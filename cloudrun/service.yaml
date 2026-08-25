@@ -39,6 +39,14 @@ spec:
           ports:
             - name: http1
               containerPort: 8080
+          # mem-fraction-static is 0.85, not the 0.90 the full-card recipe uses. This model is
+          # a VLM and the Qwen2-VL image preprocessor runs on the GPU in the API process, which
+          # is not part of the engine's static budget. At 0.90 the engine took 42.88 of 47.64
+          # GiB and left 390 MiB, so a real photograph died in preprocess with "Tried to
+          # allocate 352.00 MiB" while a 128x128 test image had passed. The KV pool is smaller
+          # for it; the window follows automatically, because the harness sizes itself from
+          # max_req_input_len rather than from a number written down twice.
+          #
           # Run through a shell so "$SGLANG_API_KEY" expands. Knative does NOT substitute
           # $(VAR) in args: passing --api-key='$(SGLANG_API_KEY)' handed SGLang that literal
           # string and made it the password. The key stays in Secret Manager either way; this
@@ -54,7 +62,7 @@ spec:
               --trust-remote-code
               --host=0.0.0.0
               --port=8080
-              --mem-fraction-static=0.90
+              --mem-fraction-static=0.85
               --context-length=262144
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer

@@ -4,8 +4,8 @@
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
 | Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, 23.6 GB; 22.13 GiB resident |
-| KV cache | `fp8_e4m3`, a 235,393-token pool across the 16 full-attention layers |
-| Context | **262,144 tokens**, the model's native window |
+| KV cache | `fp8_e4m3`, a 185,990-token pool across the 16 full-attention layers |
+| Context | 262,144 native; **185,984 usable** per request, which is what the KV pool admits |
 | Decode, seven workloads | **111.0 tok/s** (translation 73.7, prose 76.6, chat 79.2, summary 85.4, math 139.4, code 150.0, JSON 172.7) |
 | Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
 | Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
@@ -121,10 +121,17 @@ recipe and are absent here; the target model keeps its own small state pool, siz
 | KV pool, `fp8_e4m3` | 235,393 tokens |
 | Free after capture | 3.62 GiB |
 
-At `--mem-fraction-static 0.90` the budget is 42.9 GiB, and the drafter's 3.7 GiB is the difference
-between this and an MTP deployment on the same card. The pool still holds 235,393 tokens, so a
-single request reaches the full 262,144 window; eight concurrent requests do not, which is why this
-serves one slot.
+At `--mem-fraction-static 0.85` the budget is 40.5 GiB, and the drafter's 3.7 GiB is the difference
+between this and an MTP deployment on the same card.
+
+The fraction is 0.85 rather than the full card recipe's 0.90 because this model is a VLM and the
+Qwen2-VL image preprocessor runs on the GPU in the API process, outside the engine's static
+budget. At 0.90 the engine took 42.88 of 47.64 GiB and left 390 MiB, and a 1024x1024 image died
+in `preprocess` with *Tried to allocate 352.00 MiB* - while a 128x128 test image had passed, which
+is how it survived the first round of testing.
+
+Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
+`max_req_input_len` is what the pool will admit. Size clients from the latter.
 
 ## Serving
 
