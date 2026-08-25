@@ -15,6 +15,7 @@
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
 | Batching | one slot, `--max-running-requests 1` |
 | Quality | 10/10 on the arithmetic set |
+| Vision | native; images preprocessed on CPU, verified to 3000x2000 |
 
 Decode is the seven-workload benchmark measured by a two-call delta — the same prompt at 60 and
 600 tokens, `(c2−c1)/(d2−d1)` — which cancels prefill and network from the figure. Prefill is
@@ -124,11 +125,16 @@ recipe and are absent here; the target model keeps its own small state pool, siz
 At `--mem-fraction-static 0.85` the budget is 40.5 GiB, and the drafter's 3.7 GiB is the difference
 between this and an MTP deployment on the same card.
 
-The fraction is 0.85 rather than the full card recipe's 0.90 because this model is a VLM and the
-Qwen2-VL image preprocessor runs on the GPU in the API process, outside the engine's static
-budget. At 0.90 the engine took 42.88 of 47.64 GiB and left 390 MiB, and a 1024x1024 image died
-in `preprocess` with *Tried to allocate 352.00 MiB* - while a 128x128 test image had passed, which
-is how it survived the first round of testing.
+This model is a VLM, and the two flags that make images work are about where preprocessing runs
+rather than how much memory is left for it. The "fast" Qwen2-VL image processor is the torchvision
+one: it allocates on the device, in the API process, outside the engine's static budget. A
+1024x1024 image failed at `0.90` needing 352 MiB, and failed again at `0.85` needing 392 MiB with
+154 MiB free - shrinking the engine's budget does not reliably buy room for an allocation that
+grows with the image. `--disable-fast-image-processor` preprocesses on the CPU and asks the GPU
+for nothing; `0.85` stays as margin. Verified to 3000x2000 (5,828 image tokens, 6.4s).
+
+A 128x128 test image passes under every one of these configurations, which is how the first round
+of vision testing missed all of it.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
 `max_req_input_len` is what the pool will admit. Size clients from the latter.

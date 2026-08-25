@@ -39,6 +39,12 @@ spec:
           ports:
             - name: http1
               containerPort: 8080
+          # --disable-fast-image-processor moves image preprocessing off the GPU. The "fast"
+          # processor is the torchvision one and it allocates on the device, in the API process,
+          # outside the engine's static budget - so shrinking that budget did not reliably help:
+          # a 1024x1024 image failed at 0.90 needing 352 MiB, and again at 0.85 needing 392 MiB
+          # with 154 MiB free. The slow path preprocesses on CPU and asks the GPU for nothing.
+          #
           # mem-fraction-static is 0.85, not the 0.90 the full-card recipe uses. This model is
           # a VLM and the Qwen2-VL image preprocessor runs on the GPU in the API process, which
           # is not part of the engine's static budget. At 0.90 the engine took 42.88 of 47.64
@@ -79,6 +85,7 @@ spec:
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
               --enable-metrics
+              --disable-fast-image-processor
               --api-key "$SGLANG_API_KEY"
           env:
             - name: SGLANG_API_KEY
