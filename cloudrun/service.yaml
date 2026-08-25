@@ -1,27 +1,14 @@
-# Qwen3.8-27B NVFP4 on 1/2 an NVIDIA RTX PRO 6000, as a Cloud Run service.
+# Qwen3.8-27B in NVFP4 on half an NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block
+# drafting. Applied with `gcloud alpha run services replace`.
 #
-# This is the Cloud Run track, not Compute Engine. The fractional RTX PRO 6000 grant is on
-# run.googleapis.com and is measured in milliGPUs: a 1/2-GPU instance consumes 500 of them, and
-# jinaai-dev holds 3000 in us-central1 (six such instances). Compute Engine's own
-# NVIDIA_RTX_PRO_6000 quota is a different counter and is 0 - scripts/provision.sh in this repo
-# targets that one and stays blocked on it.
+# `services replace` is used rather than `run deploy --args=...` because that flag splits on
+# commas and several values here contain them. It also resets anything set imperatively with
+# `services update`, which is how a min-instances setting was lost once.
 #
-# Applied with `gcloud alpha run services replace cloudrun/service.yaml`, which is used rather
-# than `gcloud alpha run deploy --args=...` because that flag splits on commas: the
-# speculative-config JSON below contains commas, and bash expands its braces besides. A YAML
-# args list has neither problem.
-#
-# Preview constraints this file encodes (from the private preview user guide):
-#   - only 0.5 and 1 are accepted for nvidia.com/gpu; 0.25 and 0.75 are refused
-#   - gpu-zonal-redundancy-disabled MUST be 'true' or the deploy hangs or fails on quota
-#   - the container must listen on 8080; vllm/vllm-openai defaults to 8000, hence --port
-#   - 1/2 GPU allows 10-16 vCPU and 40-64GiB; this takes the top of both, because the weights
-#     are pulled and loaded on every cold start and that is CPU and RAM bound
-#   - HF_TOKEN is required even for a public repo, to avoid 401/429 from the Hub
-#
-# The startup probe is deliberately enormous. There is no GCS mount here: vLLM pulls ~23GB from
-# HuggingFace and then compiles, on a service that scales to zero, so a cold start is minutes.
-# initialDelaySeconds 240 + 20 failures x 60s gives it up to 24 minutes before Cloud Run gives up.
+# Reachable from the internet, gated by SGLang's own bearer token. That is a deliberate choice
+# and a different risk from the llama.cpp box compromised in August: SGLang runs no server-side
+# tools, so there is no exec_shell_command behind this door - a caller with the key can spend
+# GPU and read the model, nothing else.
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
@@ -33,17 +20,17 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/maxScale: '1'
+        # Load-bearing, not a convenience: this is the only backend dataroom has, and a cold
+        # start is ~10 minutes (23GB of weights, then torch.compile, then autotune).
         autoscaling.knative.dev/minScale: '1'
         run.googleapis.com/cpu-throttling: 'false'
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: 'true'
+        # Mandatory in this preview; without it the deploy hangs or fails on quota.
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
       containerConcurrency: 4
       timeoutSeconds: 600
-      # The one service account already holding secretAccessor on HF_TOKEN. Using the default
-      # compute SA instead would have meant widening that secret to the project's default
-      # identity, which every other service also runs as.
       serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
@@ -52,50 +39,45 @@ spec:
           ports:
             - name: http1
               containerPort: 8080
-          # command overrides the image ENTRYPOINT; args alone are appended to it.
+          # Run through a shell so "$SGLANG_API_KEY" expands. Knative does NOT substitute
+          # $(VAR) in args: passing --api-key='$(SGLANG_API_KEY)' handed SGLang that literal
+          # string and made it the password. The key stays in Secret Manager either way; this
+          # file never contains it.
           command:
-            - python3
+            - /bin/sh
+            - -c
           args:
-            - -m
-            - sglang.launch_server
-            # The BF16-lm_head checkpoint, not the packed-FP4 twin. DFlash2's candidate
-            # selector runs top-k over logits, so head precision is structural rather than a
-            # rounding detail - upstream's own message is "DFlash2 selector requires a dense
-            # FP16/BF16/FP32 target lm_head". The same thing killed a grafted Q2_K head on the
-            # L4 build. Costs ~1.7GB over the packed twin.
-            - --model-path=RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead
-            - --served-model-name=Qwen3.8-27B-NVFP4
-            - --trust-remote-code
-            - --host=0.0.0.0
-            - --port=8080
-            # Half a card, so this is not the recipe's 96GB budget: 0.90 x 47.6 = 42.9GB, less
-            # ~23.6 weights and ~3.8 drafter and ~3.5 runtime, leaves ~12GB of KV = ~380k
-            # tokens at 32.8KB. One 262144 request still fits; eight do not.
-            - --mem-fraction-static=0.90
-            - --context-length=262144
-            - --kv-cache-dtype=fp8_e4m3
-            # Required on SM120. trtllm_mha is SM100-only.
-            - --attention-backend=flashinfer
-            - --chunked-prefill-size=4096
-            - --max-prefill-tokens=4096
-            # Single slot: this serves one reader, and the KV budget above is sized for it.
-            - --max-running-requests=1
-            - --speculative-algorithm=DFLASH
-            - --speculative-draft-model-path=z-lab/Qwen3.8-27B-DFlash2
-            - --speculative-num-draft-tokens=8
-            - --speculative-draft-model-quantization=unquant
-            - --speculative-draft-attention-backend=flashinfer
-            - --min-free-slots-delay=1
-            - --reasoning-parser=qwen3
-            # qwen3_coder decodes this template's <tool_call><function=...> payload. SGLang
-            # needs no vLLM-style --enable-auto-tool-choice.
-            - --tool-call-parser=qwen3_coder
-            - --sampling-defaults=model
-            # Off by default in SGLang, and the harness's live rate badges have nothing else to
-            # read: this engine has no /slots, which is where the llama.cpp backends' live
-            # counts come from.
-            - --enable-metrics
+            - >-
+              exec python3 -m sglang.launch_server
+              --model-path=RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead
+              --served-model-name=Qwen3.8-27B-NVFP4
+              --trust-remote-code
+              --host=0.0.0.0
+              --port=8080
+              --mem-fraction-static=0.90
+              --context-length=262144
+              --kv-cache-dtype=fp8_e4m3
+              --attention-backend=flashinfer
+              --chunked-prefill-size=4096
+              --max-prefill-tokens=4096
+              --max-running-requests=1
+              --speculative-algorithm=DFLASH
+              --speculative-draft-model-path=z-lab/Qwen3.8-27B-DFlash2
+              --speculative-num-draft-tokens=8
+              --speculative-draft-model-quantization=unquant
+              --speculative-draft-attention-backend=flashinfer
+              --min-free-slots-delay=1
+              --reasoning-parser=qwen3
+              --tool-call-parser=qwen3_coder
+              --sampling-defaults=model
+              --enable-metrics
+              --api-key "$SGLANG_API_KEY"
           env:
+            - name: SGLANG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: SGLANG_API_KEY
+                  key: latest
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: '1'
             - name: HF_TOKEN
