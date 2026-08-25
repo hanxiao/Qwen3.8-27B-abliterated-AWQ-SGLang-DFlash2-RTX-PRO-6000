@@ -4,9 +4,9 @@
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
 | Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, 23.6 GB; 22.13 GiB resident |
-| KV cache | `fp8_e4m3`, a 185,990-token pool across the 16 full-attention layers |
-| Context | 262,144 native; **185,984 usable** per request, which is what the KV pool admits |
-| Decode, seven workloads | **111.0 tok/s** (translation 73.7, prose 76.6, chat 79.2, summary 85.4, math 139.4, code 150.0, JSON 172.7) |
+| KV cache | `fp8_e4m3`, a 140,166-token pool across the 16 full-attention layers |
+| Context | 262,144 native; **140,160 usable** per request, which is what the KV pool admits |
+| Decode, seven workloads | **110.9 tok/s** (chat 76.3, translation 76.4, prose 76.8, summary 100.0, code 130.9, math 145.6, JSON 170.2) |
 | Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
 | Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
@@ -15,7 +15,7 @@
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
 | Batching | one slot, `--max-running-requests 1` |
 | Quality | 10/10 on the arithmetic set |
-| Vision | native; images preprocessed on CPU, verified to 3000x2000 |
+| Vision | native, preprocessed on the GPU; input bounded to 1,024 image tokens |
 
 Decode is the seven-workload benchmark measured by a two-call delta — the same prompt at 60 and
 600 tokens, `(c2−c1)/(d2−d1)` — which cancels prefill and network from the figure. Prefill is
@@ -119,25 +119,52 @@ recipe and are absent here; the target model keeps its own small state pool, siz
 | Visible | 47.64 GiB |
 | Weights, target | 22.13 GiB |
 | Weights, drafter | 3.72 GiB |
-| KV pool, `fp8_e4m3` | 185,990 tokens |
-| Free for the image preprocessor | ~2.4 GiB, handed back by the 0.85 fraction |
+| KV pool, `fp8_e4m3` | 140,166 tokens |
+| Free for the image preprocessor | ~4.8 GiB, handed back by the 0.80 fraction |
 
-At `--mem-fraction-static 0.85` the budget is 40.5 GiB, and the drafter's 3.7 GiB is the difference
-between this and an MTP deployment on the same card.
+At `--mem-fraction-static 0.80` the budget is 38.1 GiB, and the drafter's 3.7 GiB is the difference
+between this and an MTP deployment on the same card. The five points given up against 0.85 cost
+45,824 tokens of KV pool and no decode at all: the seven-workload mean is 110.9 tok/s at 0.80
+against 111.0 at 0.85, which is noise. Pool size and decode rate are close to independent here,
+because one slot decoding one sequence touches a fixed working set whatever the pool's ceiling is.
 
-This model is a VLM, and the two flags that make images work are about where preprocessing runs
-rather than how much memory is left for it. The "fast" Qwen2-VL image processor is the torchvision
-one: it allocates on the device, in the API process, outside the engine's static budget. A
-1024x1024 image failed at `0.90` needing 352 MiB, and failed again at `0.85` needing 392 MiB with
-154 MiB free - shrinking the engine's budget does not reliably buy room for an allocation that
-grows with the image. `--disable-fast-image-processor` preprocesses on the CPU and asks the GPU
-for nothing; `0.85` stays as margin. Verified to 3000x2000 (5,828 image tokens, 6.4s).
+This model is a VLM, and vision cost GPU memory in a way the static budget does not see. The
+"fast" Qwen2-VL image processor is the torchvision one: it allocates on the device, in the API
+process, outside the engine's budget, and the allocation grows with the image. A 1024x1024 image
+failed at `0.90` needing 352 MiB, and failed again at `0.85` needing 392 MiB with 154 MiB free.
+Shrinking the fraction is the wrong instrument for this - the fraction is a constant and the
+allocation is a function of the input, so it can always be outgrown.
+
+Bounding the input fixes it at the source. Qwen2-VL's processor resizes rather than rejects:
+aspect ratio is preserved and dimensions round to patch multiples, so a cap is a ceiling on cost
+and not a rejection of large images. This checkpoint has patch_size 16 and merge_size 2, so a
+token covers 32x32 = 1024 pixels and 1,048,576 pixels is exactly 1,024 image tokens. Preprocessing
+then runs on the GPU, which is both what it is for and faster - a 3000x2000 image takes 0.52 s on
+the device against 0.94 s on the CPU, because the resize happens where the pixels already are.
+
+The kwarg is `size`, not `max_pixels`, and this is worth stating because the wrong one fails
+silently. This processor's `preprocessor_config.json` carries `size: {longest_edge: 16777216,
+shortest_edge: 65536}` and no `min_pixels`/`max_pixels` at all. `--mm-process-config
+'{"image":{"max_pixels":1048576}}'` is accepted, echoed back by `/get_server_info` verbatim, and
+ignored: a 3000x2000 image still produced 5,828 image tokens. `longest_edge` is an area in pixels
+here rather than an edge length, which is why the untouched default is a 16,384-token ceiling.
+
+| Image | Default | `size.longest_edge` 1048576 | Latency |
+| --- | --- | --- | --- |
+| 512x512 | 256 tok | 256 | 0.55 s |
+| 1024x1024 | 1,024 | 1,024 | 0.65 s |
+| 2048x2048 | 4,096 | **1,024** | 0.63 s |
+| 3000x2000 | 5,828 | **1,014** | 0.52 s |
+
+Below the cap nothing changes; above it, cost is flat. `0.80` is then headroom for a bounded
+allocation rather than an attempt to outrun an unbounded one.
 
 A 128x128 test image passes under every one of these configurations, which is how the first round
-of vision testing missed all of it.
+of vision testing missed all of it. Test at the size the clients actually send.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
-`max_req_input_len` is what the pool will admit. Size clients from the latter.
+`max_req_input_len` is what the pool will admit - 140,160 here. Size clients from the latter, and
+re-read it after any change to `--mem-fraction-static`, which moves it.
 
 ## Serving
 

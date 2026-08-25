@@ -39,19 +39,28 @@ spec:
           ports:
             - name: http1
               containerPort: 8080
-          # --disable-fast-image-processor moves image preprocessing off the GPU. The "fast"
-          # processor is the torchvision one and it allocates on the device, in the API process,
-          # outside the engine's static budget - so shrinking that budget did not reliably help:
-          # a 1024x1024 image failed at 0.90 needing 352 MiB, and again at 0.85 needing 392 MiB
-          # with 154 MiB free. The slow path preprocesses on CPU and asks the GPU for nothing.
+          # Images are preprocessed on the GPU, and the input is bounded so that the
+          # allocation is bounded with it. Qwen2-VL's processor resizes rather than rejects:
+          # aspect ratio is preserved and dimensions round to patch multiples, so this is a
+          # ceiling on cost and not a refusal of large images. This checkpoint has patch_size 16
+          # and merge_size 2, so a token covers 32x32 = 1024 pixels and 1,048,576 pixels is
+          # exactly 1,024 image tokens, whatever arrives. Measured: 2048x2048 goes 4,096 -> 1,024
+          # tokens and 3000x2000 goes 5,828 -> 1,014, both in ~0.6s, while anything already under
+          # the cap is untouched.
           #
-          # mem-fraction-static is 0.85, not the 0.90 the full-card recipe uses. This model is
-          # a VLM and the Qwen2-VL image preprocessor runs on the GPU in the API process, which
-          # is not part of the engine's static budget. At 0.90 the engine took 42.88 of 47.64
-          # GiB and left 390 MiB, so a real photograph died in preprocess with "Tried to
-          # allocate 352.00 MiB" while a 128x128 test image had passed. The KV pool is smaller
-          # for it; the window follows automatically, because the harness sizes itself from
-          # max_req_input_len rather than from a number written down twice.
+          # The kwarg is `size`, not `max_pixels`, and the wrong one fails silently. This
+          # processor's config carries size: {longest_edge: 16777216, shortest_edge: 65536} and no
+          # min_pixels/max_pixels at all, so --mm-process-config '{"image":{"max_pixels":...}}'
+          # was accepted, echoed back by /get_server_info verbatim, and ignored - the 3000x2000
+          # image still produced 5,828 tokens. longest_edge is an area in pixels here, not an edge
+          # length, which is why the untouched default is a 16,384-token ceiling.
+          #
+          # Unbounded was the bug, and shrinking mem-fraction-static was the wrong instrument for
+          # it: 0.90 failed needing 352 MiB and 0.85 failed needing 392 MiB with 154 MiB free,
+          # because the fraction is a constant and the allocation is a function of the input, so
+          # it can always be outgrown. 0.80 is headroom for a bounded allocation rather than an
+          # attempt to outrun an unbounded one. It costs 45,824 tokens of KV pool
+          # (max_req_input_len 185,984 -> 140,160) and no decode: 110.9 tok/s against 111.0.
           #
           # Run through a shell so "$SGLANG_API_KEY" expands. Knative does NOT substitute
           # $(VAR) in args: passing --api-key='$(SGLANG_API_KEY)' handed SGLang that literal
@@ -68,7 +77,7 @@ spec:
               --trust-remote-code
               --host=0.0.0.0
               --port=8080
-              --mem-fraction-static=0.85
+              --mem-fraction-static=0.80
               --context-length=262144
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer
@@ -85,7 +94,7 @@ spec:
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
               --enable-metrics
-              --disable-fast-image-processor
+              --mm-process-config '{"image":{"size":{"longest_edge":1048576,"shortest_edge":65536}}}'
               --api-key "$SGLANG_API_KEY"
           env:
             - name: SGLANG_API_KEY

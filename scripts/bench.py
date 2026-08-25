@@ -7,9 +7,13 @@ which on a remote service are most of a short generation.
 
     python3 scripts/bench.py https://YOUR-SERVICE.run.app
 """
-import json, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 URL, MODEL = sys.argv[1], "Qwen3.8-27B-NVFP4"
-TOK = subprocess.run(["gcloud","auth","print-identity-token"],capture_output=True,text=True).stdout.strip()
+# The service authenticates with SGLang's own bearer key, not Cloud Run IAM: it is
+# public-ingress and --api-key gates it. The identity token is kept as the fallback for
+# a private deployment of the same yaml.
+TOK = os.environ.get("SGLANG_API_KEY") or subprocess.run(
+    ["gcloud","auth","print-identity-token"],capture_output=True,text=True).stdout.strip()
 def post(body, timeout=900):
     r = urllib.request.Request(URL+"/v1/chat/completions", json.dumps(body).encode(),
         {"Content-Type":"application/json","Authorization":"Bearer "+TOK})

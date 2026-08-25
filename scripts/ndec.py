@@ -2,9 +2,13 @@
 # Net-decode tok/s by the two-call delta method from MiaAI-Lab/bench/ndec.py:
 # same prompt at 60 and 600 tokens, (c2-c1)/(d2-d1). Cancels prefill AND network latency,
 # which my earlier single-call numbers both included.
-import json, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 URL, MODEL = sys.argv[1], sys.argv[2]
-TOK = subprocess.run(["gcloud","auth","print-identity-token"],capture_output=True,text=True).stdout.strip()
+# The service authenticates with SGLang's own bearer key, not Cloud Run IAM: it is
+# public-ingress and --api-key gates it. The identity token is kept as the fallback for
+# a private deployment of the same yaml.
+TOK = os.environ.get("SGLANG_API_KEY") or subprocess.run(
+    ["gcloud","auth","print-identity-token"],capture_output=True,text=True).stdout.strip()
 def call(prompt, mt, thinking=False):
     body = {"model": MODEL, "messages":[{"role":"user","content":prompt}],
             "temperature":0.0, "max_tokens":mt,
