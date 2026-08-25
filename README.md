@@ -12,7 +12,7 @@
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
 | Engine | SGLang, `lmsysorg/sglang:qwen38-27b` with the DFlash 2 backport baked in |
 | Attention | FlashInfer for target and draft |
-| GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120, 43.6 GiB used |
+| GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
 | Batching | one slot, `--max-running-requests 1` |
 | Quality | 10/10 on the arithmetic set |
 
@@ -118,8 +118,8 @@ recipe and are absent here; the target model keeps its own small state pool, siz
 | Visible | 47.64 GiB |
 | Weights, target | 22.13 GiB |
 | Weights, drafter | 3.72 GiB |
-| KV pool, `fp8_e4m3` | 235,393 tokens |
-| Free after capture | 3.62 GiB |
+| KV pool, `fp8_e4m3` | 185,990 tokens |
+| Free for the image preprocessor | ~2.4 GiB, handed back by the 0.85 fraction |
 
 At `--mem-fraction-static 0.85` the budget is 40.5 GiB, and the drafter's 3.7 GiB is the difference
 between this and an MTP deployment on the same card.
