@@ -218,20 +218,20 @@ gantt
     dateFormat X
     axisFormat %M:%S
     section Cloud Run
-    Schedule + image pull  70s   :done, sched, 0, 70
+    Schedule + image pull 70s     :done, sched, 0, 70s
     section Load
-    Import + init  21s            :done, init, 70, 91
-    Target weights from HF  406s  :crit, tw, 91, 497
-    Drafter weights  56s          :crit, dw, 497, 553
+    Import + init 21s             :done, init, after sched, 21s
+    Target weights from HF 406s   :crit, tw, after init, 406s
+    Drafter weights 56s           :crit, dw, after tw, 56s
     section Allocate
-    Mamba + KV pools  2s          :done, pools, 553, 555
-    FlashInfer autotune  15s      :done, tune, 555, 570
+    Mamba + KV pools 2s           :done, pools, after dw, 2s
+    FlashInfer autotune 15s       :done, tune, after pools, 15s
     section Compile
-    Prefill CUDA graph  33s       :active, g1, 570, 603
-    Target verify graph  1s       :active, g2, 603, 604
-    Draft verify graph  6s        :active, g3, 604, 610
+    Prefill CUDA graph 33s        :active, g1, after tune, 33s
+    Target verify graph 1s        :active, g2, after g1, 1s
+    Draft verify graph 6s         :active, g3, after g2, 6s
     section Serve
-    Warmup to first token  10s    :done, warm, 610, 620
+    Warmup to first token 10s     :done, warm, after g3, 10s
 ```
 
 **462 s of the 620 — three quarters — is pulling weights over the network**, 23 GB at 57 MB/s from
