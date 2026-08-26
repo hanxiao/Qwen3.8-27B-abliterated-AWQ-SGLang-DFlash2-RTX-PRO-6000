@@ -62,6 +62,19 @@ spec:
           # attempt to outrun an unbounded one. It costs 45,824 tokens of KV pool
           # (max_req_input_len 185,984 -> 140,160) and no decode: 110.9 tok/s against 111.0.
           #
+          # --max-mamba-cache-size 5 is the floor, and on purpose. The hybrid state cache is
+          # sized in units of mamba_ratio, which is 5 for this model, so slots must be >= 5 per
+          # request: 4 refuses to start with "resulting max_num_reqs=0". SGLang auto-picks 8, but
+          # floor(8/5) and floor(5/5) are both 1 request, so the extra three slots buy no
+          # concurrency - only radix buffer. Dropping them is worth +10,738 tokens of context
+          # (140,160 -> 150,898) and costs nothing measurable: prefix reuse stays at 13,504 of
+          # 13,552 tokens and decode is 113.2 tok/s against 110.9.
+          #
+          # Only ssm_state scales with slots (1.27 -> 0.84 GB); intermediate_ssm_state_cache is a
+          # fixed 2.25 GB, which is why 8 -> 5 returns 0.43 GB and not 1.34.
+          #
+          # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot.
+          #
           # Run through a shell so "$SGLANG_API_KEY" expands. Knative does NOT substitute
           # $(VAR) in args: passing --api-key='$(SGLANG_API_KEY)' handed SGLang that literal
           # string and made it the password. The key stays in Secret Manager either way; this
@@ -90,6 +103,7 @@ spec:
               --speculative-draft-model-quantization=unquant
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
+              --max-mamba-cache-size=5
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model

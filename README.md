@@ -3,19 +3,20 @@
 | | |
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
-| Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, 23.6 GB; 22.13 GiB resident |
-| KV cache | `fp8_e4m3`, a 140,166-token pool across the 16 full-attention layers |
-| Context | 262,144 native; **140,160 usable** per request, which is what the KV pool admits |
-| Decode, seven workloads | **110.9 tok/s** (chat 76.3, translation 76.4, prose 76.8, summary 100.0, code 130.9, math 145.6, JSON 170.2) |
+| Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, **23.13 GiB resident** |
+| KV cache | `fp8_e4m3`, a 150,904-token pool; **42 KiB/token** (32 target + 10 drafter) |
+| Context | 262,144 native; **150,898 usable** per request, verified against the server's own refusal |
+| Decode, seven workloads | **113.2 tok/s** (prose 76.0, chat 76.2, translation 76.9, summary 98.7, code 140.0, math 150.8, JSON 173.6) |
 | Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
 | Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
 | Engine | SGLang, `lmsysorg/sglang:qwen38-27b` with the DFlash 2 backport baked in |
 | Attention | FlashInfer for target and draft |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
-| Batching | one slot, `--max-running-requests 1` |
+| Batching | one slot, `--max-running-requests 1`, `--max-mamba-cache-size 5` |
 | Quality | 10/10 on the arithmetic set |
 | Vision | native, preprocessed on the GPU; input bounded to 1,024 image tokens |
+| Cold start | 620 s to first token; 0 s in practice, held warm by `minScale: '1'` |
 
 Decode is the seven-workload benchmark measured by a two-call delta — the same prompt at 60 and
 600 tokens, `(c2−c1)/(d2−d1)` — which cancels prefill and network from the figure. Prefill is
@@ -114,19 +115,46 @@ recipe and are absent here; the target model keeps its own small state pool, siz
 
 ## Memory
 
-| | |
-| --- | --- |
-| Visible | 47.64 GiB |
-| Weights, target | 22.13 GiB |
-| Weights, drafter | 3.72 GiB |
-| KV pool, `fp8_e4m3` | 140,166 tokens |
-| Free for the image preprocessor | ~4.8 GiB, handed back by the 0.80 fraction |
+Every step below is a logged number, not an estimate. The two Prometheus gauges are **target-only**
+- `weight_memory_usage_gb` and `kv_cache_memory_usage_gb` exclude the drafter entirely and the
+Mamba pool has no gauge at all - so metrics alone leave 11.9 GiB unaccounted. The startup log
+closes it:
 
-At `--mem-fraction-static 0.80` the budget is 38.1 GiB, and the drafter's 3.7 GiB is the difference
-between this and an MTP deployment on the same card. The five points given up against 0.85 cost
-45,824 tokens of KV pool and no decode at all: the seven-workload mean is 110.9 tok/s at 0.80
-against 111.0 at 0.85, which is noise. Pool size and decode rate are close to independent here,
-because one slot decoding one sequence touches a fixed working set whatever the pool's ceiling is.
+| Step | GiB | Avail after | Source |
+| --- | ---: | ---: | --- |
+| Card visible | 47.64 | | ½ of 96 |
+| CUDA context + driver reserve | −2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
+| Weights, target | −23.13 | **22.12** | `Load weight end … mem usage=23.13` |
+| Weights, drafter | −3.72 | **18.36** | `type=DFlash2DraftModel, mem usage=3.72` |
+| Mamba/GDN state cache | −3.13 | 15.23 | `ssm 0.84 + intermediate_ssm 2.25 + conv 0.04` |
+| KV pool, target (16 full layers) | −4.60 | **10.50** | `Memory pool end. avail mem=10.50` |
+| KV pool, drafter (5 layers) | −1.44 | **9.06** | `Memory pool end. avail mem=9.06` |
+| CUDA graphs | −2.46 | 6.60 | prefill 2.26 + verify 0.10 + draft 0.09 |
+| FlashInfer autotune + fragmentation | −0.68 | **5.92** | `available_gpu_mem=5.92` |
+
+The line that matters for sizing context is the pair of KV pools. Geometry is `head_dim` **256**
+with 4 KV heads, so one token of fp8 KV costs `2 × 4 × 256 = 2 KiB` per layer: **32 KiB** over the
+target's 16 full-attention layers, plus **10 KiB** over the drafter's 5. A token therefore costs
+**42 KiB**, and context on a speculative deployment is ~30% more expensive than on a plain one.
+That is the price of 113 tok/s, and it is worth paying, but it should be paid knowingly.
+
+`--max-mamba-cache-size 5` is on the floor and deliberately so. The hybrid state cache is sized in
+units of `mamba_ratio`, which is 5 here, so slots must be at least 5 per request; SGLang's
+auto-sizing picks 8, and 4 fails at startup with `resulting max_num_reqs=0`. Both 5 and 8 admit
+exactly one request - `floor(size/5)` - so the three extra slots buy no concurrency, only radix
+buffer. Dropping them is worth **+10,738 tokens** and costs nothing measurable: prefix reuse stays
+at 13,504 of 13,552 tokens (99.6%) and decode is 113.2 tok/s against 110.9. **Raising
+`--max-running-requests` requires raising this in step**, or the server refuses to start.
+
+The saving is smaller than the slot count suggests because only `ssm_state` scales with slots
+(1.27 → 0.84 GiB). `intermediate_ssm_state_cache` is a fixed **2.25 GiB** - the largest single
+piece of the Mamba pool and immovable. That is why 8 → 5 returns 0.43 GiB rather than 1.34.
+
+At `--mem-fraction-static 0.80` the drafter's weights and KV are the difference between this and
+an MTP deployment on the same card. The five points given up against 0.85 cost 45,824 tokens of
+pool and no decode at all - 110.9 tok/s against 111.0, which is noise. Pool size and decode rate
+are close to independent here, because one slot decoding one sequence touches a fixed working set
+whatever the pool's ceiling is.
 
 This model is a VLM, and vision cost GPU memory in a way the static budget does not see. The
 "fast" Qwen2-VL image processor is the torchvision one: it allocates on the device, in the API
@@ -163,24 +191,67 @@ A 128x128 test image passes under every one of these configurations, which is ho
 of vision testing missed all of it. Test at the size the clients actually send.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
-`max_req_input_len` is what the pool will admit - 140,160 here. Size clients from the latter, and
-re-read it after any change to `--mem-fraction-static`, which moves it.
+`max_req_input_len` is what the pool will admit - **150,898** here. Size clients from the latter,
+and re-read it after any change to `--mem-fraction-static` or `--max-mamba-cache-size`, both of
+which move it. Verified by bisection rather than trusted: 150,732 tokens is served, 151,388 is
+refused with *exceeds the maximum allowed length (150898 tokens)*.
 
 ## Serving
 
 `cloudrun/service.yaml` is the deployed configuration. Three things about it are Cloud Run's rather
 than SGLang's: the container must listen on 8080, `gpu-zonal-redundancy-disabled` must be `'true'`
-or the deploy hangs, and `minScale: '1'` is load-bearing — with `maxScale: '1'` and no warm
-instance, every request during the ten-minute cold start is answered with *no available instance*.
-
-A cold start is ~10 minutes: 400 s to pull 23 GB of weights, 94 s of `torch.compile`, 44 s of
-warmup and FlashInfer autotuning. Baking the weights into the image removes the first and largest
-of those.
+or the deploy hangs, and `minScale: '1'` is load-bearing for the reason the next section measures.
 
 `--max-model-len` has no counterpart here, but the equivalent trap does: SGLang validates
 `input + completion ≤ context` and returns 400, where llama.cpp clamps. A client that asks for the
 whole 262,144-token window beside a 53-token prompt is refused, and a harness that reads that 400
 as context overflow will compact, retry and fail. Cap the completion.
+
+## Cold start
+
+A cold start is 620 s wall clock — 10m18s from `services replace` to serving. Phase boundaries are
+read off the startup log's own timestamps, `22:52:11` to `23:01:21`:
+
+```mermaid
+gantt
+    title Cold start to first token - 620 s measured
+    dateFormat X
+    axisFormat %M:%S
+    section Cloud Run
+    Schedule + image pull  70s   :done, sched, 0, 70
+    section Load
+    Import + init  21s            :done, init, 70, 91
+    Target weights from HF  406s  :crit, tw, 91, 497
+    Drafter weights  56s          :crit, dw, 497, 553
+    section Allocate
+    Mamba + KV pools  2s          :done, pools, 553, 555
+    FlashInfer autotune  15s      :done, tune, 555, 570
+    section Compile
+    Prefill CUDA graph  33s       :active, g1, 570, 603
+    Target verify graph  1s       :active, g2, 603, 604
+    Draft verify graph  6s        :active, g3, 604, 610
+    section Serve
+    Warmup to first token  10s    :done, warm, 610, 620
+```
+
+**462 s of the 620 — three quarters — is pulling weights over the network**, 23 GB at 57 MB/s from
+HuggingFace plus the drafter's 3.7 GB. Nothing else is close: graph capture is 40 s and every
+allocation together is 17 s.
+
+Two levers, and only one of them is shipped:
+
+| Lever | Effect | Status |
+| --- | --- | --- |
+| `minScale: '1'` | Users pay **0 s**. The instance is never reaped, so no request ever meets a cold start. | **Shipped**, load-bearing |
+| Bake weights into the image | Replaces a 57 MB/s HuggingFace pull with an in-region Artifact Registry layer pull. The 70 s already spent pulling this image is the evidence it is the faster path. | Not built — **saving unmeasured** |
+
+`minScale: '1'` turns cold start from a user-facing cost into a deploy-time one: the 620 s is only
+ever paid when a revision is replaced. It is not a tuning preference — with `maxScale: '1'` and no
+warm instance, every request during those ten minutes is answered with *no available instance*.
+
+Baking is the obvious remaining win, and the honest position is that its size is not yet known:
+building a ~25 GB image and timing it is the only way to find out, and this repo has not done it.
+`docker/build.sh` is where it would go.
 
 ## Reproducing
 
