@@ -67,7 +67,8 @@ spec:
           # request: 4 refuses to start with "resulting max_num_reqs=0". SGLang auto-picks 8, but
           # floor(8/5) and floor(5/5) are both 1 request, so the extra three slots buy no
           # concurrency - only radix buffer. Dropping them is worth +10,738 tokens of context
-          # (140,160 -> 150,898) and costs nothing measurable: prefix reuse stays at 13,504 of
+          # (140,160 -> 150,898 with the BF16 drafter; 206,492 once the drafter went NVFP4)
+          # and costs nothing measurable: prefix reuse stays at 13,504 of
           # 13,552 tokens and decode is 113.2 tok/s against 110.9.
           #
           # Only ssm_state scales with slots (1.27 -> 0.84 GB); intermediate_ssm_state_cache is a
@@ -98,9 +99,9 @@ spec:
               --max-prefill-tokens=4096
               --max-running-requests=1
               --speculative-algorithm=DFLASH
-              --speculative-draft-model-path=z-lab/Qwen3.8-27B-DFlash2
+              --speculative-draft-model-path=maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal
               --speculative-num-draft-tokens=8
-              --speculative-draft-model-quantization=unquant
+              --speculative-draft-model-quantization=modelopt_fp4
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
               --max-mamba-cache-size=5

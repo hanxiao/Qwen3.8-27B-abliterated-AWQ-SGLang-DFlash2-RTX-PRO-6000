@@ -4,12 +4,12 @@
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
 | Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, **23.13 GiB resident** |
-| KV cache | `fp8_e4m3`, a 150,904-token pool; **42 KiB/token** (32 target + 10 drafter) |
-| Context | 262,144 native; **150,898 usable** per request, verified against the server's own refusal |
-| Decode, seven workloads | **113.2 tok/s** (prose 76.0, chat 76.2, translation 76.9, summary 98.7, code 140.0, math 150.8, JSON 173.6) |
+| KV cache | `fp8_e4m3`, a 206,498-token pool; **42 KiB/token** (32 target + 10 drafter) |
+| Context | 262,144 native; **206,490 usable** per request (`max_req_input_len` 206,492) |
+| Decode, seven workloads | **117.9 tok/s** (prose 84.5, chat 80.0, translation 77.8, summary 102.5, code 151.6, math 160.6, JSON 168.0) |
 | Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
-| Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
-| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
+| Mean accepted length | **4.19** of a possible 8, averaged over the seven bench workloads |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/), NVFP4 W4A4 calibrated - [`maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal`](https://huggingface.co/maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal), **1.59 GB** resident, block drafting at 8 |
 | Engine | SGLang, `lmsysorg/sglang:qwen38-27b` with the DFlash 2 backport baked in |
 | Attention | FlashInfer for target and draft |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
@@ -106,8 +106,9 @@ fp8_e4m3` is the best supported precision for this model, because SGLang's 4-bit
 built for a hybrid-GDN architecture. `--tool-call-parser qwen3_coder` decodes the
 `<tool_call><function=…>` payload this template emits; `hermes` parses none of it, and a model whose
 tool calls are silently dropped answers nothing at all. `--speculative-draft-model-quantization
-unquant` keeps the BF16 drafter unquantized, and `--speculative-draft-attention-backend flashinfer`
-gives the draft the same kernels as the target.
+modelopt_fp4` is required for the NVFP4 drafter - SGLang does not requantize a draft model on the
+fly, and the flag is what makes it read the ModelOpt scales - and
+`--speculative-draft-attention-backend flashinfer` gives the draft the same kernels as the target.
 
 DFlash 2 is a pure-attention drafter of five sliding-window layers, so it needs no recurrent state
 pool of its own. The `--mamba-*` flags and `--linear-attn-verify-backend` belong to the DSpark
@@ -125,25 +126,27 @@ closes it:
 | Card visible | 47.64 | | ½ of 96 |
 | CUDA context + driver reserve | −2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
 | Weights, target | −23.13 | **22.12** | `Load weight end … mem usage=23.13` |
-| Weights, drafter | −3.72 | **18.36** | `type=DFlash2DraftModel, mem usage=3.72` |
-| Mamba/GDN state cache | −3.13 | 15.23 | `ssm 0.84 + intermediate_ssm 2.25 + conv 0.04` |
-| KV pool, target (16 full layers) | −4.60 | **10.50** | `Memory pool end. avail mem=10.50` |
-| KV pool, drafter (5 layers) | −1.44 | **9.06** | `Memory pool end. avail mem=9.06` |
-| CUDA graphs | −2.46 | 6.60 | prefill 2.26 + verify 0.10 + draft 0.09 |
-| FlashInfer autotune + fragmentation | −0.68 | **5.92** | `available_gpu_mem=5.92` |
+| Weights, drafter | −1.59 | **20.49** | `type=DFlash2DraftModel, quant=modelopt_fp4, mem usage=1.59` |
+| Mamba/GDN state cache | −3.13 | 17.36 | `ssm 0.84 + intermediate_ssm 2.25 + conv 0.04` |
+| KV pool, target (16 full layers) | −6.30 | **11.04** | `K size: 3.15 GB, V size: 3.15 GB` |
+| KV pool, drafter (5 layers) | −1.97 | **9.07** | `K size: 0.98 GB, V size: 0.98 GB` |
+| CUDA graphs | −2.50 | 6.57 | prefill 2.26 + target verify 0.11 + draft verify 0.13 |
+| FlashInfer autotune + fragmentation | −0.67 | **5.90** | `available_gpu_mem=5.90` |
 
 The line that matters for sizing context is the pair of KV pools. Geometry is `head_dim` **256**
 with 4 KV heads, so one token of fp8 KV costs `2 × 4 × 256 = 2 KiB` per layer: **32 KiB** over the
 target's 16 full-attention layers, plus **10 KiB** over the drafter's 5. A token therefore costs
 **42 KiB**, and context on a speculative deployment is ~30% more expensive than on a plain one.
-That is the price of 113 tok/s, and it is worth paying, but it should be paid knowingly.
+That is the price of 118 tok/s, and it is worth paying, but it should be paid knowingly.
 
 `--max-mamba-cache-size 5` is on the floor and deliberately so. The hybrid state cache is sized in
 units of `mamba_ratio`, which is 5 here, so slots must be at least 5 per request; SGLang's
 auto-sizing picks 8, and 4 fails at startup with `resulting max_num_reqs=0`. Both 5 and 8 admit
 exactly one request - `floor(size/5)` - so the three extra slots buy no concurrency, only radix
 buffer. Dropping them is worth **+10,738 tokens** and costs nothing measurable: prefix reuse stays
-at 13,504 of 13,552 tokens (99.6%) and decode is 113.2 tok/s against 110.9. **Raising
+at 13,504 of 13,552 tokens (99.6%) and decode is 113.2 tok/s against 110.9 - both measured on
+the earlier BF16-drafter build, so read them against each other rather than against the
+117.9 above. **Raising
 `--max-running-requests` requires raising this in step**, or the server refuses to start.
 
 The saving is smaller than the slot count suggests because only `ssm_state` scales with slots
@@ -191,10 +194,46 @@ A 128x128 test image passes under every one of these configurations, which is ho
 of vision testing missed all of it. Test at the size the clients actually send.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
-`max_req_input_len` is what the pool will admit - **150,898** here. Size clients from the latter,
+`max_req_input_len` is what the pool will admit - **206,492** here. Size clients from the latter,
 and re-read it after any change to `--mem-fraction-static` or `--max-mamba-cache-size`, both of
-which move it. Verified by bisection rather than trusted: 150,732 tokens is served, 151,388 is
-refused with *exceeds the maximum allowed length (150898 tokens)*.
+which move it, and the drafter's precision moves it most. Verified by bisection rather than
+trusted on the earlier BF16-drafter build, where the pool was 150,904: 150,732 tokens was served
+and 151,388 refused with *exceeds the maximum allowed length (150898 tokens)*.
+
+## Quantizing the drafter buys context, and some speed
+
+The drafter was BF16 at 3.72 GiB resident. In NVFP4 it is **1.59 GiB**, and nearly all of the
+2.13 GiB that frees turns into KV pool: at 42 KiB/token the window goes **150,898 -> 206,492
+usable, +36.8%**. That is the main result. A speculative deployment pays for its drafter twice -
+once in weights, once in a second KV pool sized at the same token count - so shrinking the weights
+compounds.
+
+It is also faster, which was not obvious in advance. Quantizing a drafter risks the only thing a
+drafter is for: if acceptance falls, the target verifies more rejected tokens and throughput drops.
+The uncalibrated round-to-nearest version of this same checkpoint demonstrates exactly that on its
+author's card - identical VRAM, 3.26 accepted of 8, and *slower* than BF16. The calibrated one
+recovers it, and the recovery transfers to this target:
+
+| workload | BF16 drafter | NVFP4 calibrated | |
+| --- | ---: | ---: | ---: |
+| prose | 76.2 | **84.5** | +10.9% |
+| chat | 76.2 | **80.0** | +5.0% |
+| translation | 76.2 | **77.8** | +2.1% |
+| summary | 98.8 | **102.5** | +3.7% |
+| code | 135.7 | **151.6** | +11.7% |
+| math | 148.8 | **160.6** | +7.9% |
+| JSON | 164.3 | **168.0** | +2.3% |
+| **mean** | **110.9** | **117.9** | **+6.3%** |
+
+Both columns are `scripts/bench.py` against this deployment, two runs each, spread under 0.5%.
+Arithmetic stays 10/10: the target verifies every drafted token, so a cheaper drafter cannot change
+what is emitted, only how fast it is proposed. Mean accepted length measured 4.19 of 8 across these
+workloads.
+
+The two flags are the whole change - `--speculative-draft-model-path` and
+`--speculative-draft-model-quantization modelopt_fp4`. The base weights are byte-identical to
+`z-lab/Qwen3.8-27B-DFlash2` (same 3,848,817,896 bytes, same LFS sha256), so this is a requantization
+of the drafter already in use rather than a different model.
 
 ## Serving
 
@@ -266,5 +305,7 @@ The serving recipe follows [`MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark`](
 which worked out the flags and the memory budget for the full card and carries the DFlash 2
 backport overlay this build fetches. The two-call delta measurement is its `bench/ndec.py`. DFlash 2
 is [z-lab/dflash](https://github.com/z-lab/dflash); the drafter card is
-[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The L4 companion to
+[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The NVFP4
+quantization of that drafter, and the activation calibration that makes it worth using, are
+[`maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal`](https://huggingface.co/maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal). The L4 companion to
 this deployment is [`Qwen3.8-27B-UD-Q4_K_XL-L4`](https://github.com/hanxiao/Qwen3.8-27B-UD-Q4_K_XL-L4).
