@@ -4,12 +4,12 @@
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
 | Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, **23.13 GiB resident** |
-| KV cache | `fp8_e4m3`, a 206,498-token pool; **42 KiB/token** (32 target + 10 drafter) |
-| Context | 262,144 native; **206,490 usable** per request (`max_req_input_len` 206,492) |
-| Decode, seven workloads | **117.9 tok/s** (prose 84.5, chat 80.0, translation 77.8, summary 102.5, code 151.6, math 160.6, JSON 168.0) |
+| KV cache | `fp8_e4m3`, a 150,904-token pool; **42 KiB/token** (32 target + 10 drafter) |
+| Context | 262,144 native; **150,898 usable** per request, verified against the server's own refusal |
+| Decode, seven workloads | **110.9 tok/s** (prose 76.2, chat 76.2, translation 76.2, summary 98.8, code 135.7, math 148.8, JSON 164.3) |
 | Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
-| Mean accepted length | **4.19** of a possible 8, averaged over the seven bench workloads |
-| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/), NVFP4 W4A4 calibrated - [`maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal`](https://huggingface.co/maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal), **1.59 GB** resident, block drafting at 8 |
+| Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
 | Engine | SGLang, `lmsysorg/sglang:qwen38-27b` with the DFlash 2 backport baked in |
 | Attention | FlashInfer for target and draft |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
@@ -200,7 +200,34 @@ which move it, and the drafter's precision moves it most. Verified by bisection 
 trusted on the earlier BF16-drafter build, where the pool was 150,904: 150,732 tokens was served
 and 151,388 refused with *exceeds the maximum allowed length (150898 tokens)*.
 
-## Quantizing the drafter buys context, and some speed
+## Quantizing the drafter buys context and speed, and is WITHDRAWN
+
+**Do not use this configuration.** It is documented here because the measurements below are real
+and the failure it caused is not visible in any of them.
+
+In use, this drafter produced stretches of degenerate text - long runs of loosely associated words
+with no syntax - most often inside thinking blocks. The deployment has been reverted to the BF16
+drafter (`z-lab/Qwen3.8-27B-DFlash2`, `--speculative-draft-model-quantization unquant`), which
+restores 150,898 usable context and the 110.9 tok/s figures at the top of this file.
+
+The cause is not established. What can be said is that the reasoning I used to rule the risk out
+was wrong: I argued that the target verifies every drafted token, so a cheaper drafter could not
+change what is emitted, only how fast it is proposed. That holds for speculative decoding with
+rejection sampling. DFlash 2 drafts a whole block through its own `candidate_selector`, and if
+that path accepts on a looser criterion, the drafter's distribution reaches the output - which
+would show up first in the flattest distribution the model produces, which is exactly where it
+did show up.
+
+One number in the measurements now reads as a warning rather than a result: mean accepted length
+came out at **4.19 of 8** here, against 3.60 reported by the checkpoint's author on their target
+and 3.71 for the BF16 drafter. A quantized drafter whose blocks are accepted *more* often than
+the unquantized one is not self-evidently a better drafter.
+
+Nothing in the benchmark below would have caught this. Seven throughput workloads and a 10/10
+arithmetic check all pass while prose comes apart, and `s/it` improves when long blocks of
+nonsense are accepted. Judging a drafter needs generated text read as text.
+
+## What the measurements were
 
 The drafter was BF16 at 3.72 GiB resident. In NVFP4 it is **1.59 GiB**, and nearly all of the
 2.13 GiB that frees turns into KV pool: at 42 KiB/token the window goes **150,898 -> 206,492
