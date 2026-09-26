@@ -21,7 +21,7 @@ spec:
       annotations:
         autoscaling.knative.dev/maxScale: '1'
         # Load-bearing, not a convenience: this is the only backend dataroom has, and a cold
-        # start is ~10 minutes (23GB of weights, then torch.compile, then autotune).
+        # start is ~10 minutes (22 GiB of weights from HF, then autotune and CUDA graphs).
         autoscaling.knative.dev/minScale: '1'
         run.googleapis.com/cpu-throttling: 'false'
         run.googleapis.com/execution-environment: gen2
@@ -35,7 +35,9 @@ spec:
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-dflash2:v1
+        # Stock lmsysorg/sglang:v0.5.20, mirrored by docker/build.sh. DFlash 2 is upstream since
+        # v0.5.19; the old overlay image had sglang#37817 (stale GDN state on prefix-cache hits).
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20
           ports:
             - name: http1
               containerPort: 8080
@@ -94,6 +96,7 @@ spec:
               --context-length=262144
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer
+              --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=4096
               --max-prefill-tokens=4096
               --max-running-requests=1

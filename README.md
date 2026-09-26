@@ -3,32 +3,32 @@
 | | |
 | --- | --- |
 | Model | Qwen3.8-27B, [`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead) |
-| Weights | NVFP4 W4A4 with a dense BF16 `lm_head`, **23.13 GiB resident** |
-| KV cache | `fp8_e4m3`, a 150,904-token pool; **42 KiB/token** (32 target + 10 drafter) |
-| Context | 262,144 native; **150,898 usable** per request, verified against the server's own refusal |
-| Decode, seven workloads | **110.9 tok/s** (prose 76.2, chat 76.2, translation 76.2, summary 98.8, code 135.7, math 148.8, JSON 164.3) |
-| Prefill | 5,016 tok/s at a 27k prompt, 2,862 at 108k, both uncached |
-| Mean accepted length | **6.53** of a possible 8; draft acceptance 0.789 |
-| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.8 GB, block drafting at 8 |
-| Engine | SGLang, `lmsysorg/sglang:qwen38-27b` with the DFlash 2 backport baked in |
-| Attention | FlashInfer for target and draft |
-| GPU | ½ NVIDIA RTX PRO 6000 Blackwell — 47.64 GiB of 96, SM120 |
+| Weights | NVFP4 MLPs, FP8 attention and GDN projections, dense BF16 `lm_head`; **21.84 GiB resident** |
+| KV cache | `fp8_e4m3`, a 180,573-token pool; **42 KiB/token** (32 target + 10 drafter) |
+| Context | 262,144 native; **180,567 usable** per request (`max_req_input_len`) |
+| Decode, seven workloads | **109.7 tok/s** streamed (prose 72.6, chat 78.0, translation 71.2, summary 87.7, code 152.9, math 144.4, JSON 161.2) |
+| Decode, thinking on, sampled | prose 61.7, chat 68.6 tok/s |
+| Prefill | 5,900 tok/s at 9k, 5,180 at 31k, 2,684 at 124k, all uncached |
+| Mean accepted length | 3.5 of 8 over every decode batch of the full test (all workloads, thinking and sampling included) |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.72 GiB, block drafting at 8 |
+| Engine | SGLang v0.5.20, the stock `lmsysorg/sglang:v0.5.20` image |
+| Attention | FlashInfer for target and draft; FlashInfer GDN kernels for prefill |
+| GPU | ½ NVIDIA RTX PRO 6000 Blackwell: 47.64 GiB of 96, SM120 |
 | Batching | one slot, `--max-running-requests 1`, `--max-mamba-cache-size 5` |
-| Quality | 10/10 on the arithmetic set |
+| Quality | needle retrieval 5/5 at 30k and 120k, 12/12 multi-step math with thinking, 10/10 arithmetic |
 | Vision | native, preprocessed on the GPU; input bounded to 1,024 image tokens |
-| Cold start | 620 s to first token; 0 s in practice, held warm by `minScale: '1'` |
+| Cold start | ~10 min to first token; 0 s in practice, held warm by `minScale: '1'` |
 
-Decode is the seven-workload benchmark measured by a two-call delta — the same prompt at 60 and
-600 tokens, `(c2−c1)/(d2−d1)` — which cancels prefill and network from the figure. Prefill is
-time to first token over prompts of unique random words, so the radix cache cannot serve them.
-Accepted length is tokens emitted per target forward pass, read from SGLang's `spec_accept_length`
-after a sustained decode.
+Decode is `scripts/bench2.py`: each answer is streamed and timed from its first token to its last,
+`(tokens - 1) / (t_last - t_first)`, two prompts per workload at up to 800 tokens, greedy with
+thinking off unless stated. Prefill is time to first token over prompts of unique random words, so
+the radix cache cannot serve them. Quality is `scripts/quality.py`.
 
 The table above is the shipped configuration. The sections below give what fixes each value in
 it.
 
 ```bash
-bash docker/build.sh                 # bake the DFlash 2 backport into the SGLang image
+bash docker/build.sh                 # mirror lmsysorg/sglang:v0.5.20 into Artifact Registry
 gcloud alpha run services replace cloudrun/service.yaml
 ```
 
@@ -63,8 +63,8 @@ what the extra acceptance earns. The plateau is drafting time, not acceptance.
 DFlash 2 removes exactly that cost. It is a block-diffusion drafter: it predicts a whole block of
 eight tokens in one pass, keeps the top candidates at every position, and traces one path through
 them with a lightweight selector. Two-tap dynamic convolutions in its backbone keep the draft from
-decaying toward the end of the block. At 6.53 accepted tokens per target pass it emits more than
-MTP does at any depth, and it pays one draft pass rather than eight.
+decaying toward the end of the block. At 6.53 accepted tokens per target pass (a sustained decode
+on the overlay image) it emits more than MTP does at any depth, and it pays one draft pass rather than eight.
 
 Decoding is lossless. The target verifies every drafted token, so greedy output matches the
 unspeculated model exactly and sampling preserves its distribution; the arithmetic set is 10/10
@@ -81,23 +81,53 @@ DFlash2 selector requires a dense FP16/BF16/FP32 target lm_head.
 
 `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` is the same NVFP4 body with that head left dense, and it
 is what the numbers above were measured on. Upstream carries a patch that runs a quantized head in
-place through `lm_head.quant_method.apply`; it exists because the alternative — dequantizing once
-into a dense copy — allocates several gigabytes during draft-graph capture.
+place through `lm_head.quant_method.apply`; it exists because the alternative - dequantizing once
+into a dense copy - allocates several gigabytes during draft-graph capture.
 
-## The image carries a backport
+## The image is stock, and the backport had a bug
 
-DFlash 2 landed in SGLang on 2026-08-19 (PR #35371, PR #35496). The cookbook-pinned image
-`lmsysorg/sglang:qwen38-27b` predates it and ships only the DFlash 1 model class, so serving DFlash 2
-means overlaying eleven modules from upstream. The reference recipe bind-mounts them, which Cloud
-Run cannot do; [`docker/build.sh`](docker/build.sh) bakes them into an image instead.
+DFlash 2 landed in SGLang on 2026-08-19 (PR #35371, PR #35496) and shipped in v0.5.19. Before that,
+serving it meant overlaying eleven upstream modules onto `lmsysorg/sglang:qwen38-27b`, and the first
+version of this deployment baked that overlay into its image. v0.5.20 needs none of it, and moving
+to it on the same card and flags changed three things:
 
-vLLM is not an alternative today. Its released image has only `DFlashDraftModel`, and the nightly
-that carries the merge of PR #52816 has a `DFlash2Qwen3Model` whose decoder layer has no
-`attention_conv`, so the checkpoint refuses to load:
+| | overlay image | v0.5.20 |
+| --- | ---: | ---: |
+| Usable context | 150,898 | **180,567** |
+| Decode, prose / chat / code | 68.9 / 72.4 / 136.6 | **72.6 / 78.0 / 152.9** |
+| Decode, mean of seven | 105.2 | **109.7** |
+| Prefill at 9k / 31k / 124k | 4,911 / 4,809 / 2,592 | **5,900 / 5,180 / 2,684** |
 
-```
-ValueError: There is no module or parameter named 'layers.0.attention_conv' in DFlash2Qwen3Model.
-```
+The prefill column includes the GDN kernel below. The context comes from memory accounting, not
+from a new flag: the overlay image allocated 8.27 GiB of KV for 150,904 tokens, about 55 KiB a
+token, where the geometry needs 42; v0.5.20 allocates exactly 42, and loads the target in
+21.84 GiB rather than 23.13.
+
+The overlay also carried a correctness bug, sglang#37817. On a hybrid model the radix cache keeps
+the GDN recurrent state at fixed checkpoints next to the attention KV. The overlay's DFlash worker
+decided whether a verify step had crossed a checkpoint by comparing the sequence length before the
+step with a length that had not yet been advanced, so it never saw a crossing, never saved the
+state, and left cache entries whose attention KV and recurrent state described different
+positions. A later request that reused such a prefix continued from the wrong state. The upstream
+report measured 24 of 56 warm-cache next tokens wrong before the fix (#37818) and none of the stable
+cases after it. Every multi-turn conversation reuses its prefix, so this was a production bug, not
+a corner case. v0.5.20 carries the fix.
+
+vLLM has had DFlash 2 since v0.28, but prefix-cache hits drop to zero with it (z-lab/dflash#165),
+and nothing published shows it beating SGLang single-stream on SM120.
+
+## Prefill runs on FlashInfer's GDN kernel
+
+48 of the 64 layers are gated delta net layers, and SGLang only selects FlashInfer's GDN prefill
+kernel by default on SM100; SM120 gets the Triton one. `--linear-attn-prefill-backend flashinfer`
+picks it here, and it is most of the prefill gain above: at 9k and 31k, v0.5.20 alone gave 5,195
+and 4,923 tok/s and the kernel took that to 5,900 and 5,180. It needs CUDA 13 and a prefill chunk
+of at most 8,192.
+
+It also made prefix caching consistent. With the Triton kernel, a follow-up turn served from the
+radix cache and the same turn recomputed after `/flush_cache` gave different greedy text within
+the first sentence, on both the overlay image and plain v0.5.20. With the FlashInfer kernel the two
+are identical. The quality set is unchanged by it: 5/5 retrieval at 30k and 120k, 12/12 math.
 
 ## Flags that are not preferences
 
@@ -106,8 +136,7 @@ fp8_e4m3` is the best supported precision for this model, because SGLang's 4-bit
 built for a hybrid-GDN architecture. `--tool-call-parser qwen3_coder` decodes the
 `<tool_call><function=…>` payload this template emits; `hermes` parses none of it, and a model whose
 tool calls are silently dropped answers nothing at all. `--speculative-draft-model-quantization
-modelopt_fp4` is required for the NVFP4 drafter - SGLang does not requantize a draft model on the
-fly, and the flag is what makes it read the ModelOpt scales - and
+unquant` keeps the drafter in BF16 (see the withdrawn configuration below), and
 `--speculative-draft-attention-backend flashinfer` gives the draft the same kernels as the target.
 
 DFlash 2 is a pure-attention drafter of five sliding-window layers, so it needs no recurrent state
@@ -124,20 +153,21 @@ closes it:
 | Step | GiB | Avail after | Source |
 | --- | ---: | ---: | --- |
 | Card visible | 47.64 | | ½ of 96 |
-| CUDA context + driver reserve | −2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
-| Weights, target | −23.13 | **22.12** | `Load weight end … mem usage=23.13` |
-| Weights, drafter | −1.59 | **20.49** | `type=DFlash2DraftModel, quant=modelopt_fp4, mem usage=1.59` |
-| Mamba/GDN state cache | −3.13 | 17.36 | `ssm 0.84 + intermediate_ssm 2.25 + conv 0.04` |
-| KV pool, target (16 full layers) | −6.30 | **11.04** | `K size: 3.15 GB, V size: 3.15 GB` |
-| KV pool, drafter (5 layers) | −1.97 | **9.07** | `K size: 0.98 GB, V size: 0.98 GB` |
-| CUDA graphs | −2.50 | 6.57 | prefill 2.26 + target verify 0.11 + draft verify 0.13 |
-| FlashInfer autotune + fragmentation | −0.67 | **5.90** | `available_gpu_mem=5.90` |
+| CUDA context + driver reserve | -2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
+| Weights, target | -21.84 | **23.40** | `Load weight end ... mem usage=21.84` |
+| Weights, drafter | -3.72 | **19.65** | `type=DFlash2DraftModel, avail mem=19.65, mem usage=3.72` |
+| Mamba/GDN state cache | -3.13 | 16.52 | `ssm 0.84 + intermediate_ssm 2.25 + conv 0.04` |
+| KV pool, target (16 full layers) | -5.52 | **10.85** | `K size: 2.76 GB, V size: 2.76 GB` |
+| KV pool, drafter (5 layers) | -1.72 | **9.11** | `K size: 0.86 GB, V size: 0.86 GB` |
+| Autotune, prefill CUDA graph | -3.01 | 6.10 | `Capture target prefill CUDA graph end ... mem usage=2.29, avail mem=6.10` |
+| Verify CUDA graphs | -0.03 | **6.07** | `available_gpu_mem=6.07` |
 
 The line that matters for sizing context is the pair of KV pools. Geometry is `head_dim` **256**
 with 4 KV heads, so one token of fp8 KV costs `2 × 4 × 256 = 2 KiB` per layer: **32 KiB** over the
 target's 16 full-attention layers, plus **10 KiB** over the drafter's 5. A token therefore costs
 **42 KiB**, and context on a speculative deployment is ~30% more expensive than on a plain one.
-That is the price of 118 tok/s, and it is worth paying, but it should be paid knowingly.
+That is the price of speculation, and it is worth paying, but it should be paid knowingly. The
+v0.5.20 pools match it exactly: 180,573 tokens at 32 KiB is 5.52 GiB, and at 10 KiB 1.72.
 
 `--max-mamba-cache-size 5` is on the floor and deliberately so. The hybrid state cache is sized in
 units of `mamba_ratio`, which is 5 here, so slots must be at least 5 per request; SGLang's
@@ -145,8 +175,8 @@ auto-sizing picks 8, and 4 fails at startup with `resulting max_num_reqs=0`. Bot
 exactly one request - `floor(size/5)` - so the three extra slots buy no concurrency, only radix
 buffer. Dropping them is worth **+10,738 tokens** and costs nothing measurable: prefix reuse stays
 at 13,504 of 13,552 tokens (99.6%) and decode is 113.2 tok/s against 110.9 - both measured on
-the earlier BF16-drafter build, so read them against each other rather than against the
-117.9 above. **Raising
+the overlay image with the two-call delta, so read them against each other rather than against
+the table above. **Raising
 `--max-running-requests` requires raising this in step**, or the server refuses to start.
 
 The saving is smaller than the slot count suggests because only `ssm_state` scales with slots
@@ -194,11 +224,11 @@ A 128x128 test image passes under every one of these configurations, which is ho
 of vision testing missed all of it. Test at the size the clients actually send.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
-`max_req_input_len` is what the pool will admit - **206,492** here. Size clients from the latter,
-and re-read it after any change to `--mem-fraction-static` or `--max-mamba-cache-size`, both of
-which move it, and the drafter's precision moves it most. Verified by bisection rather than
-trusted on the earlier BF16-drafter build, where the pool was 150,904: 150,732 tokens was served
-and 151,388 refused with *exceeds the maximum allowed length (150898 tokens)*.
+`max_req_input_len` is what the pool will admit - **180,567** here. Size clients from the latter,
+and re-read it after any change to `--mem-fraction-static`, `--max-mamba-cache-size`, the drafter
+or the SGLang version, all of which move it. On the overlay image, where it read 150,898, it was
+verified by bisection: 150,732 tokens was served and 151,388 refused with *exceeds the maximum
+allowed length (150898 tokens)*.
 
 ## Quantizing the drafter buys context and speed, and is WITHDRAWN
 
@@ -207,8 +237,8 @@ and the failure it caused is not visible in any of them.
 
 In use, this drafter produced stretches of degenerate text - long runs of loosely associated words
 with no syntax - most often inside thinking blocks. The deployment has been reverted to the BF16
-drafter (`z-lab/Qwen3.8-27B-DFlash2`, `--speculative-draft-model-quantization unquant`), which
-restores 150,898 usable context and the 110.9 tok/s figures at the top of this file.
+drafter (`z-lab/Qwen3.8-27B-DFlash2`, `--speculative-draft-model-quantization unquant`). The
+measurements in this section were taken on the overlay image with the two-call delta.
 
 The cause is not established. What can be said is that the reasoning I used to rule the risk out
 was wrong: I argued that the target verifies every drafted token, so a cheaper drafter could not
@@ -230,8 +260,8 @@ nonsense are accepted. Judging a drafter needs generated text read as text.
 ## What the measurements were
 
 The drafter was BF16 at 3.72 GiB resident. In NVFP4 it is **1.59 GiB**, and nearly all of the
-2.13 GiB that frees turns into KV pool: at 42 KiB/token the window goes **150,898 -> 206,492
-usable, +36.8%**. That is the main result. A speculative deployment pays for its drafter twice -
+2.13 GiB that frees turns into KV pool: at 42 KiB/token the window went **150,898 -> 206,492
+usable, +36.8%** on the overlay image. That is the main result. A speculative deployment pays for its drafter twice -
 once in weights, once in a second KV pool sized at the same token count - so shrinking the weights
 compounds.
 
@@ -262,6 +292,19 @@ The two flags are the whole change - `--speculative-draft-model-path` and
 `z-lab/Qwen3.8-27B-DFlash2` (same 3,848,817,896 bytes, same LFS sha256), so this is a requantization
 of the drafter already in use rather than a different model.
 
+## Measured and dropped
+
+Each of these was deployed as its own service on the same half card and measured against the
+shipped configuration.
+
+| Change | Result |
+| --- | --- |
+| `--enable-torch-compile` | Decode CUDA graph capture fails at startup, `bmm_fp8_run_with_algo failed`, on both boots tried. Reported elsewhere as +12% median on a full card. |
+| FlashInfer b12x NVFP4 GEMM (sglang#38170, open, patched in) | Active and autotuned, and decode unchanged: prose 71.3 against 71.3, chat 75.6 against 75.8. Only the MLPs are NVFP4 in this checkpoint. |
+| `--chunked-prefill-size 8192` | Prefill -1% to +3% against 4096, and more activation memory. |
+| `--speculative-draft-window-size 2048` | The drafter attends to 2,048 tokens anyway, and its KV pool stays sized to the full context, so nothing is freed. |
+| Draft block 12 or 16 with the block-8 drafter | Best case up, median flat, prose slower (helix.ml's measurement on the same model). |
+
 ## Serving
 
 `cloudrun/service.yaml` is the deployed configuration. Three things about it are Cloud Run's rather
@@ -275,8 +318,9 @@ as context overflow will compact, retry and fail. Cap the completion.
 
 ## Cold start
 
-A cold start is 620 s wall clock — 10m18s from `services replace` to serving. Phase boundaries are
-read off the startup log's own timestamps, `22:52:11` to `23:01:21`:
+A cold start is 620 s wall clock on the overlay image - 10m18s from `services replace` to serving.
+Phase boundaries are read off the startup log's own timestamps, `22:52:11` to `23:01:21`. On
+v0.5.20 the phases are the same size: target weights 409 s, drafter 57 s, prefill graph 27 s.
 
 ```mermaid
 gantt
@@ -300,7 +344,7 @@ gantt
     Warmup to first token 10s     :done, warm, after g3, 10s
 ```
 
-**462 s of the 620 — three quarters — is pulling weights over the network**, 23 GB at 57 MB/s from
+**462 s of the 620 - three quarters - is pulling weights over the network**, 23 GB at 57 MB/s from
 HuggingFace plus the drafter's 3.7 GB. Nothing else is close: graph capture is 40 s and every
 allocation together is 17 s.
 
@@ -309,10 +353,10 @@ Two levers, and only one of them is shipped:
 | Lever | Effect | Status |
 | --- | --- | --- |
 | `minScale: '1'` | Users pay **0 s**. The instance is never reaped, so no request ever meets a cold start. | **Shipped**, load-bearing |
-| Bake weights into the image | Replaces a 57 MB/s HuggingFace pull with an in-region Artifact Registry layer pull. The 70 s already spent pulling this image is the evidence it is the faster path. | Not built — **saving unmeasured** |
+| Bake weights into the image | Replaces a 57 MB/s HuggingFace pull with an in-region Artifact Registry layer pull. The 70 s already spent pulling this image is the evidence it is the faster path. | Not built - **saving unmeasured** |
 
 `minScale: '1'` turns cold start from a user-facing cost into a deploy-time one: the 620 s is only
-ever paid when a revision is replaced. It is not a tuning preference — with `maxScale: '1'` and no
+ever paid when a revision is replaced. It is not a tuning preference - with `maxScale: '1'` and no
 warm instance, every request during those ten minutes is answered with *no available instance*.
 
 Baking is the obvious remaining win, and the honest position is that its size is not yet known:
@@ -322,15 +366,24 @@ building a ~25 GB image and timing it is the only way to find out, and this repo
 ## Reproducing
 
 ```bash
-python3 scripts/bench.py https://YOUR-SERVICE.run.app     # seven workloads + arithmetic
-python3 scripts/ndec.py  https://YOUR-SERVICE.run.app Qwen3.8-27B-NVFP4
+export SGLANG_API_KEY=...
+python3 scripts/bench2.py  https://YOUR-SERVICE.run.app     # seven workloads, streamed decode
+python3 scripts/quality.py https://YOUR-SERVICE.run.app     # needle at 30k/120k, 12 math problems
+python3 scripts/bench.py   https://YOUR-SERVICE.run.app     # two-call delta + arithmetic
 ```
+
+`bench.py` is the two-call delta: the same prompt at 60 and 600 tokens, `(c2-c1)/(d2-d1)`. It
+cancels prefill and network, but it assumes both builds write 600 tokens. Across SGLang versions
+the greedy text differs, and when one build answers in 106 tokens the delta covers 46 of them and
+reads a translation workload as 37% slower than it is; a single request arriving mid-run gave a
+negative rate. `bench2.py` times each streamed answer from its first token to its last, which
+holds for any answer length.
 
 ## Credit
 
 The serving recipe follows [`MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark`](https://github.com/MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark),
-which worked out the flags and the memory budget for the full card and carries the DFlash 2
-backport overlay this build fetches. The two-call delta measurement is its `bench/ndec.py`. DFlash 2
+which worked out the flags and the memory budget for the full card and carried the DFlash 2
+backport overlay the first version of this build used. The two-call delta measurement is its `bench/ndec.py`. DFlash 2
 is [z-lab/dflash](https://github.com/z-lab/dflash); the drafter card is
 [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The NVFP4
 quantization of that drafter, and the activation calibration that makes it worth using, are
