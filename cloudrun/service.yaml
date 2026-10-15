@@ -87,7 +87,7 @@ spec:
           args:
             - >-
               exec python3 -m sglang.launch_server
-              --model-path=RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead
+              --model-path=cyankiwi/Qwen3.8-27B-AWQ-INT4
               --served-model-name=Qwen3.8-27B-NVFP4
               --trust-remote-code
               --host=0.0.0.0
@@ -99,19 +99,22 @@ spec:
               --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=4096
               --max-prefill-tokens=4096
-              --max-running-requests=1
+              --max-running-requests=2
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=z-lab/Qwen3.8-27B-DFlash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=unquant
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=5
+              --max-mamba-cache-size=10
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
               --enable-metrics
               --mm-process-config '{"image":{"size":{"longest_edge":1048576,"shortest_edge":65536}}}'
+              --grammar-backend=none
+              --prefill-decode-interval=40
+              --enable-cache-report
               --api-key "$SGLANG_API_KEY"
           env:
             - name: SGLANG_API_KEY
