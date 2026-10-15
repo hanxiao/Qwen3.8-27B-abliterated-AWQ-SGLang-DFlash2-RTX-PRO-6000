@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| Model | Qwen3.8-27B, [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4), served under the name `Qwen3.8-27B-NVFP4` so existing clients keep working |
+| Model | Qwen3.8-27B, [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4), served as `Qwen3.8-27B-AWQ-INT4` |
 | Weights | INT4 W4A16 (AWQ, group 32), dense BF16 `lm_head`; **19.12 GiB resident** |
 | Fidelity | on this deployment's own traffic, KL 0.0466 to the FP8 reference and 91.7% top-1 agreement, against 0.0724 and 89.3% for the NVFP4 build this replaced |
 | Slots | **2** (`--max-running-requests 2`, `--max-mamba-cache-size 10`) |

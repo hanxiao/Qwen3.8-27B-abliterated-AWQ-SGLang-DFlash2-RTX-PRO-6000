@@ -7,7 +7,7 @@ delta in bench.py breaks when a build answers in fewer tokens than its 600 cap).
 """
 import json, os, sys, time, urllib.request
 URL, ROUNDS = sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 1
-MODEL, KEY = "Qwen3.8-27B-NVFP4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 W = {
     "prose": ["Write a detailed technical essay on the history of computing, from Babbage to GPUs.",
               "Write a long, vivid short story about a lighthouse keeper who finds a message in a bottle."],

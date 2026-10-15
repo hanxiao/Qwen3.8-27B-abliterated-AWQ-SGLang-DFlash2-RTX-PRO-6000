@@ -88,7 +88,7 @@ spec:
             - >-
               exec python3 -m sglang.launch_server
               --model-path=cyankiwi/Qwen3.8-27B-AWQ-INT4
-              --served-model-name=Qwen3.8-27B-NVFP4
+              --served-model-name=Qwen3.8-27B-AWQ-INT4
               --trust-remote-code
               --host=0.0.0.0
               --port=8080

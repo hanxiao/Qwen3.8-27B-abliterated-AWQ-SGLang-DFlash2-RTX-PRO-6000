@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 URL, OUT = sys.argv[1], sys.argv[2]
 CS = [int(c) for c in sys.argv[3:]] or [1, 2, 4]
-MODEL, KEY = "Qwen3.8-27B-NVFP4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 W = {
     "prose": ["Write a detailed technical essay on the history of computing, from Babbage to GPUs.",
               "Write a long, vivid short story about a lighthouse keeper who finds a message in a bottle."],

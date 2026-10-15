@@ -3,14 +3,14 @@
 unique random words arrives. Reports each stream's rate before and during the prefill and its
 longest gap between chunks, plus the long prompt's time to first token.
 
-    SGLANG_API_KEY=... python3 stall.py <url> [D] [words]     # default D=2, words=40000 (~60k tokens)
+    SGLANG_API_KEY=... python3 stall.py <url> [D] [words]     # default D=2, words=40000 (~124k tokens)
 """
 import json, os, random, sys, threading, time, urllib.request
 
 URL = sys.argv[1]
 D = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 40000
-MODEL, KEY = "Qwen3.8-27B-NVFP4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 H = {"Content-Type": "application/json", "Authorization": "Bearer " + KEY}
 
 

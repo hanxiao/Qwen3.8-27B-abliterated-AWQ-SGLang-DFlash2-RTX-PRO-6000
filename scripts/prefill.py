@@ -6,7 +6,7 @@ them) at ~9k, ~31k and ~124k tokens, streamed so the first chunk marks the end o
 """
 import json, os, random, sys, time, urllib.request
 URL = sys.argv[1]
-MODEL, KEY = "Qwen3.8-27B-NVFP4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 H = {"Content-Type": "application/json", "Authorization": "Bearer " + KEY}
 
 

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 URL, OUT = sys.argv[1], sys.argv[2]
 C = int(sys.argv[3]) if len(sys.argv) > 3 else 4
-MODEL, KEY = "Qwen3.8-27B-NVFP4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 
 
 def chat(prompt, mt, thinking):
