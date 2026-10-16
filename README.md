@@ -7,13 +7,13 @@
 | Refusals | 0 of 6 borderline prompts refused, against 5 of 6 for the stock checkpoint (`scripts/refusal.py`) |
 | Fidelity | KL 0.0544 to the stock FP8 reference and 90.97% top-1 agreement on this deployment's traffic, abliteration included; the stock AWQ checkpoint is 0.0466 and 91.74% |
 | Slots | **2** (`--max-running-requests 2`, `--max-mamba-cache-size 10`) |
-| KV cache | `fp8_e4m3`, one 202,065-token pool shared by both slots; **42 KiB/token** (32 target + 10 drafter) |
-| Context | 262,144 native; **202,059 usable** per request (`max_req_input_len`) |
-| Decode, one stream | **118.0 tok/s** streamed (prose 75.0, chat 83.6, translation 78.4, summary 98.1, code 162.5, math 154.0, JSON 174.7); the stock AWQ checkpoint, same hour, 120.0 |
-| Decode, two streams | 110.1 tok/s each, 177.4 tok/s together |
-| Decode, thinking on, sampled | prose 66.3, chat 80.5 tok/s (stock: 68.3, 77.8) |
-| Prefill | 2,760 tok/s at 9k, 2,603 at 31k, 1,781 at 124k, all uncached |
-| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.72 GiB, block drafting at 8 |
+| KV cache | `fp8_e4m3`, one 237,271-token pool shared by both slots; **42 KiB/token** (32 target + 10 drafter) |
+| Context | 262,144 native; **237,265 usable** per request (`max_req_input_len`) |
+| Decode, one stream | **123.7 tok/s** streamed (prose 79.1, chat 86.3, translation 82.8, summary 103.4, code 172.0, math 160.8, JSON 181.7); the stock AWQ checkpoint with the BF16 drafter, 120.0 |
+| Decode, two streams | 115.2 tok/s each, 183.3 tok/s together (stock: 178.5) |
+| Decode, thinking on, sampled | prose 74.2, chat 84.3 tok/s (stock: 68.3, 77.8) |
+| Prefill | 2,811 tok/s at 9k, 2,597 at 31k, 1,782 at 124k, all uncached |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), block drafting at 8 |
 | Engine | SGLang v0.5.20, the stock `lmsysorg/sglang:v0.5.20` image |
 | Attention | FlashInfer for target and draft; FlashInfer GDN kernels for prefill |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell: 47.64 GiB of 96, SM120 |
@@ -134,9 +134,9 @@ Two published 4-bit builds of an abliterated Qwen3.8-27B exist, and neither drop
 | --- | --- | ---: | ---: | ---: | --- |
 | `TelperionAI/Huihui-Qwen3.8-27B-abliterated-INT4-AWQ-GPTQ` | INT4 MLP, INT8 attention and last 8 MLPs | 25.1 GB | 110,391 | 105.1 | yes |
 | `hotdogs/Qwen3.8-27B-abliterated-AWQ-INT4` | INT4 symmetric, group 128 | 17.6 GB | | | no |
-| **this deployment** | INT4 asymmetric, group 32 (cyankiwi's) | 21.0 GB | **202,065** | **118.0** | yes |
+| **this checkpoint** | INT4 asymmetric, group 32 (cyankiwi's) | 21.0 GB | **202,065** | **118.0** | yes |
 
-TelperionAI's INT8 layers cost half the context and 14% of decode; hotdogs is text-only, and its
+All three rows use the BF16 drafter. TelperionAI's INT8 layers cost half the context and 14% of decode; hotdogs is text-only, and its
 coarser grouping is the kind that measured furthest from FP8 above. So the abliterated BF16
 checkpoint is quantized here with cyankiwi's recipe, read off their `config.json` (they do not
 publish the recipe itself): AWQ, INT4, asymmetric, group 32, the `mse` observer, every `Linear`
@@ -173,6 +173,27 @@ With thinking on and sampling, which is how the deployment is used, and at two s
 are level within run-to-run variation. The fidelity numbers measure distance from the stock
 model, so they include the abliteration itself, not only quantization error.
 
+The table above is with the BF16 drafter. The deployment closes the gap, and more, by quantizing
+the drafter to FP8 as it loads (`--speculative-draft-model-quantization fp8`): 3.72 GiB of weights
+become 2.53, read on every draft pass. Measured on test services with the abliterated target, the
+BF16-drafter control and the FP8 one booted together:
+
+| | BF16 drafter | FP8 drafter |
+| --- | ---: | ---: |
+| Decode, mean of seven, greedy | 116.8 | 124.1 / 123.7 |
+| Decode, thinking on, sampled (prose, chat) | 64.7, 79.6 | 71.6, 80.0 / 74.2, 84.3 |
+| KV pool at 2 slots | 202,065 | 237,271 |
+
+The NVFP4 drafter below also sped decode up and was withdrawn for degenerate thinking text, so
+this one was checked for that first: 24 prompts in English and Chinese, thinking on and returned
+inline, sampled, up to 4,000 tokens, on both services. zlib compression ratio 0.391 (BF16) against
+0.399 (FP8), the same 13 of 24 answers hitting the length cap, and no loops: the one
+answer with a 40-character stretch occurring four times is a regex being discussed.
+Greedy answers cannot be compared byte for byte: on the BF16 control alone, the same 24 prompts
+run one at a time and run four at once agree on 3. The rest of the suite, on the FP8 service: 64 of
+64 checked answers right at one stream and at two, needle 5/5 at 30k and 120k, math 12/12, the
+1-megapixel image and both tool-call APIs, and refusals 0 of 6.
+
 ## Two slots
 
 Every slot running at once needs its own recurrent state, and with speculation, the intermediate
@@ -182,7 +203,7 @@ same memory as the KV pool, so slots are bought with context. From the startup l
 | Slots | AWQ-INT4 pool | NVFP4 pool |
 | ---: | ---: | ---: |
 | 1 | 248,597 | 180,573 |
-| **2** | **202,065** | |
+| **2** | **202,065** (237,271 with the FP8 drafter) | |
 | 3 | 155,532 | |
 | 4 | | 40,975 |
 
@@ -277,7 +298,7 @@ fp8_e4m3` is the best supported precision for this model, because SGLang's 4-bit
 built for a hybrid-GDN architecture. `--tool-call-parser qwen3_coder` decodes the
 `<tool_call><function=…>` payload this template emits; `hermes` parses none of it, and a model whose
 tool calls are silently dropped answers nothing at all. `--speculative-draft-model-quantization
-unquant` keeps the drafter in BF16, and `--speculative-draft-attention-backend flashinfer` gives
+fp8` quantizes the drafter's weights when they load ([Abliterated](#abliterated) has the measurement), and `--speculative-draft-attention-backend flashinfer` gives
 the draft the same kernels as the target. `--grammar-backend none`, `--enable-cache-report` and
 `--prefill-decode-interval 40` are explained above.
 
@@ -296,18 +317,18 @@ recurrent state pool has no gauge at all - so the startup log is the account:
 | Card visible | 47.64 | | ½ of 96 |
 | CUDA context + driver reserve | -2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
 | Weights, target | -19.12 | **26.13** | `Load weight end ... mem usage=19.12` |
-| Weights, drafter | -3.72 | **22.37** | `type=DFlash2DraftModel, avail mem=22.37, mem usage=3.72` |
+| Weights, drafter (FP8) | -2.53 | **23.56** | `type=DFlash2DraftModel, avail mem=23.56, mem usage=2.53` |
 | Recurrent state, two slots | -4.99 | | `ssm 1.55 + intermediate_ssm 3.38 + conv 0.03 + 0.03` |
-| KV pool, target (16 full layers) | -6.16 | **11.10** | `K size: 3.08 GB, V size: 3.08 GB` |
-| KV pool, drafter (5 layers) | -1.92 | **9.17** | `K size: 0.96 GB, V size: 0.96 GB` |
-| Autotune, prefill CUDA graph | -2.74 | 6.43 | `Capture target prefill CUDA graph end ... mem usage=2.22, avail mem=6.43` |
-| Verify CUDA graphs | -0.12 | **6.31** | `available_gpu_mem=6.31` |
+| KV pool, target (16 full layers) | -7.24 | **11.51** | `K size: 3.62 GB, V size: 3.62 GB` |
+| KV pool, drafter (5 layers) | -2.26 | **9.24** | `K size: 1.13 GB, V size: 1.13 GB` |
+| Autotune, prefill CUDA graph | -2.63 | 6.61 | `Capture target prefill CUDA graph end ... mem usage=2.22, avail mem=6.61` |
+| Verify CUDA graphs | -0.12 | **6.49** | `available_gpu_mem=6.49` |
 
 The line that matters for sizing context is the pair of KV pools. Geometry is `head_dim` **256**
 with 4 KV heads, so one token of fp8 KV costs `2 × 4 × 256 = 2 KiB` per layer: **32 KiB** over the
 target's 16 full-attention layers, plus **10 KiB** over the drafter's 5. A token therefore costs
 **42 KiB**, and context on a speculative deployment is ~30% more expensive than on a plain one.
-The pools match it exactly: 202,065 tokens at 32 KiB is 6.16 GiB, and at 10 KiB 1.92.
+The pools match it exactly: 237,271 tokens at 32 KiB is 7.24 GiB, and at 10 KiB 2.26.
 
 `--mem-fraction-static 0.80` leaves room for what the static budget does not see. This model is a
 VLM, and the "fast" Qwen2-VL image processor is the torchvision one: it allocates on the device,
@@ -342,7 +363,7 @@ of vision testing missed all of it. Test at the size the clients actually send; 
 sends a 1-megapixel one.
 
 Two numbers describe the window and the smaller one binds: `context_length` is 262,144, but
-`max_req_input_len` is what the pool will admit - **202,059** here. Size clients from the latter,
+`max_req_input_len` is what the pool will admit - **237,265** here. Size clients from the latter,
 and re-read it after any change to `--mem-fraction-static`, `--max-running-requests`,
 `--max-mamba-cache-size`, the checkpoint, the drafter or the SGLang version, all of which move it.
 
@@ -364,6 +385,7 @@ shipped configuration.
 | `--chunked-prefill-size 8192` | Prefill -1% to +3% against 4096, and more activation memory. |
 | `--speculative-draft-window-size 2048` | The drafter attends to 2,048 tokens anyway, and its KV pool stays sized to the full context, so nothing is freed. |
 | Draft block 12 or 16 with the block-8 drafter | Best case up, median flat, prose slower (helix.ml's measurement on the same model). |
+| Hot-vocabulary candidate head (DFlash 2 scores its candidates over only the 33k, 66k or 99k tokens most frequent in this deployment's own output, instead of all 248k rows of `lm_head`; patched in) | 111.1, 118.2 and 119.6 tok/s against 116.8 for the control in the same hour; held-out token coverage 97.5%, 99.1% and 99.6%. The full-head projection is not where the draft pass spends its time. |
 | TelperionAI's abliterated INT4/INT8 checkpoint | 105.1 tok/s and a 110,391-token pool at two slots (above). |
 | Loading the target straight off the gcsfuse mount | 849 s for the target alone; a 32-thread copy to local disk first, 400 s; the storage client's ranged downloads, 471 s with the drafter. |
 

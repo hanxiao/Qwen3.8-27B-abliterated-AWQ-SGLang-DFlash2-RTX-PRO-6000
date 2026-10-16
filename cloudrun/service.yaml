@@ -111,7 +111,7 @@ spec:
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
-              --speculative-draft-model-quantization=unquant
+              --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
               --max-mamba-cache-size=10
