@@ -10,7 +10,7 @@ import json, os, random, sys, threading, time, urllib.request
 URL = sys.argv[1]
 D = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 40000
-MODEL, KEY = "Qwen3.8-27B-AWQ-INT4", os.environ["SGLANG_API_KEY"]
+MODEL, KEY = "Qwen3.8-27B-abliterated-AWQ-INT4", os.environ["SGLANG_API_KEY"]
 H = {"Content-Type": "application/json", "Authorization": "Bearer " + KEY}
 
 

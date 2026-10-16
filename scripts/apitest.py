@@ -9,7 +9,7 @@ import base64, json, os, sys, time, urllib.error, urllib.request
 
 URL = sys.argv[1]
 IMG = sys.argv[2] if len(sys.argv) > 2 else None
-KEY, MODEL = os.environ["SGLANG_API_KEY"], "Qwen3.8-27B-AWQ-INT4"
+KEY, MODEL = os.environ["SGLANG_API_KEY"], "Qwen3.8-27B-abliterated-AWQ-INT4"
 H = {"Content-Type": "application/json", "Authorization": "Bearer " + KEY, "anthropic-version": "2023-06-01"}
 TOOL = {"type": "function", "function": {"name": "get_weather", "description": "Get the weather for a city",
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}

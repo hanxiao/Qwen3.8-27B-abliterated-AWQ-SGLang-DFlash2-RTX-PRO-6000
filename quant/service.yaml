@@ -1,0 +1,60 @@
+# The one-off quantization run (quant/quant.py through quant/job.sh) on a whole RTX PRO 6000.
+# A service rather than a job: Cloud Run caps GPU jobs at one hour, and this took 71 minutes plus
+# the download. It runs once and idles; delete it when the output is in the bucket. 30 CPU and
+# 120 GiB is the most memory a GPU instance gets (4 GiB per CPU, 30 CPU at most), and the model
+# sits in that memory on the CPU while llm-compressor moves one layer at a time to the GPU.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: qwen38-huihui-awq
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: internal
+    run.googleapis.com/launch-stage: ALPHA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '1'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
+      timeoutSeconds: 300
+      containers:
+      - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20
+        command: [bash, -c]
+        args:
+        - "python3 -m http.server 8080 >/dev/null 2>&1 & bash /gcs/huihui-awq/job/job.sh; echo EXIT $?; sleep infinity"
+        env:
+        # Anonymous Hub downloads from Cloud Run share egress IPs and hit 429 within minutes.
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: HF_TOKEN
+              key: latest
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: '30'
+            memory: 120Gi
+            nvidia.com/gpu: '1'
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 30
+        volumeMounts:
+        - name: gcs
+          mountPath: /gcs
+      volumes:
+      - name: gcs
+        csi:
+          driver: gcsfuse.run.googleapis.com
+          volumeAttributes:
+            bucketName: BUCKET
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-rtx-pro-6000

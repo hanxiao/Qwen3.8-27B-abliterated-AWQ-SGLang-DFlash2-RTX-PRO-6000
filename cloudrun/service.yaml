@@ -1,5 +1,6 @@
-# Qwen3.8-27B in NVFP4 on half an NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block
-# drafting. Applied with `gcloud alpha run services replace`.
+# Qwen3.8-27B, abliterated (huihui-ai) and quantized to AWQ-INT4 with cyankiwi's recipe
+# (quant/), on half an NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
+# Applied with `gcloud alpha run services replace`.
 #
 # `services replace` is used rather than `run deploy --args=...` because that flag splits on
 # commas and several values here contain them. It also resets anything set imperatively with
@@ -21,7 +22,7 @@ spec:
       annotations:
         autoscaling.knative.dev/maxScale: '1'
         # Load-bearing, not a convenience: this is the only backend dataroom has, and a cold
-        # start is ~10 minutes (22 GiB of weights from HF, then autotune and CUDA graphs).
+        # start is ~12 minutes (25 GB of weights from the bucket, then autotune and CUDA graphs).
         autoscaling.knative.dev/minScale: '1'
         run.googleapis.com/cpu-throttling: 'false'
         run.googleapis.com/execution-environment: gen2
@@ -77,6 +78,11 @@ spec:
           #
           # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot.
           #
+          # The target and the drafter come from the bucket (cloudrun/gcsdl.py, parallel ranged
+          # downloads to local disk) before SGLang starts. Loading the target straight off the
+          # gcsfuse mount took 849 s; the mount is only how gcsdl.py itself arrives. The service
+          # account needs read access to the bucket.
+          #
           # Run through a shell so "$SGLANG_API_KEY" expands. Knative does NOT substitute
           # $(VAR) in args: passing --api-key='$(SGLANG_API_KEY)' handed SGLang that literal
           # string and made it the password. The key stays in Secret Manager either way; this
@@ -86,9 +92,11 @@ spec:
             - -c
           args:
             - >-
+              pip install -q google-cloud-storage &&
+              python3 /gcs/gcsdl.py BUCKET huihui-awq/out=/tmp/model dflash2=/tmp/dflash2 &&
               exec python3 -m sglang.launch_server
-              --model-path=cyankiwi/Qwen3.8-27B-AWQ-INT4
-              --served-model-name=Qwen3.8-27B-AWQ-INT4
+              --model-path=/tmp/model
+              --served-model-name=Qwen3.8-27B-abliterated-AWQ-INT4
               --trust-remote-code
               --host=0.0.0.0
               --port=8080
@@ -101,7 +109,7 @@ spec:
               --max-prefill-tokens=4096
               --max-running-requests=2
               --speculative-algorithm=DFLASH
-              --speculative-draft-model-path=z-lab/Qwen3.8-27B-DFlash2
+              --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=unquant
               --speculative-draft-attention-backend=flashinfer
@@ -122,13 +130,10 @@ spec:
                 secretKeyRef:
                   name: SGLANG_API_KEY
                   key: latest
-            - name: HF_HUB_ENABLE_HF_TRANSFER
-              value: '1'
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: HF_TOKEN
-                  key: latest
+          volumeMounts:
+            - name: weights
+              mountPath: /gcs
+              readOnly: true
           resources:
             limits:
               cpu: '16'
@@ -141,6 +146,13 @@ spec:
             periodSeconds: 60
             failureThreshold: 20
             timeoutSeconds: 30
+      volumes:
+        - name: weights
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: true
+            volumeAttributes:
+              bucketName: BUCKET
   traffic:
     - percent: 100
       latestRevision: true

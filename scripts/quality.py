@@ -8,7 +8,7 @@ random words, ~30k and ~120k tokens; the model is asked for all five. Scored per
 math: 12 generated three-step word problems with exact positive integer answers, greedy, thinking on.
 """
 import json, os, random, re, sys, urllib.request
-URL, KEY, MODEL = sys.argv[1], os.environ["SGLANG_API_KEY"], "Qwen3.8-27B-AWQ-INT4"
+URL, KEY, MODEL = sys.argv[1], os.environ["SGLANG_API_KEY"], "Qwen3.8-27B-abliterated-AWQ-INT4"
 
 
 def ask(prompt, mt=300, thinking=False):

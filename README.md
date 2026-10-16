@@ -1,38 +1,40 @@
-# Qwen3.8-27B · AWQ-INT4 · SGLang + DFlash 2 · ½ NVIDIA RTX PRO 6000
+# Qwen3.8-27B abliterated · AWQ-INT4 · SGLang + DFlash 2 · ½ NVIDIA RTX PRO 6000
 
 | | |
 | --- | --- |
-| Model | Qwen3.8-27B, [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4), served as `Qwen3.8-27B-AWQ-INT4` |
-| Weights | INT4 W4A16 (AWQ, group 32), dense BF16 `lm_head`; **19.12 GiB resident** |
-| Fidelity | on this deployment's own traffic, KL 0.0466 to the FP8 reference and 91.7% top-1 agreement, against 0.0724 and 89.3% for the NVFP4 build this replaced |
+| Model | Qwen3.8-27B abliterated, [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with cyankiwi's AWQ-INT4 recipe (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
+| Weights | INT4 W4A16 (AWQ, group 32, asymmetric), dense BF16 `lm_head`; **19.12 GiB resident**, the same as [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) |
+| Refusals | 0 of 6 borderline prompts refused, against 5 of 6 for the stock checkpoint (`scripts/refusal.py`) |
+| Fidelity | KL 0.0544 to the stock FP8 reference and 90.97% top-1 agreement on this deployment's traffic, abliteration included; the stock AWQ checkpoint is 0.0466 and 91.74% |
 | Slots | **2** (`--max-running-requests 2`, `--max-mamba-cache-size 10`) |
 | KV cache | `fp8_e4m3`, one 202,065-token pool shared by both slots; **42 KiB/token** (32 target + 10 drafter) |
 | Context | 262,144 native; **202,059 usable** per request (`max_req_input_len`) |
-| Decode, one stream | **122.3 tok/s** streamed (prose 78.2, chat 81.4, translation 85.3, summary 94.2, code 180.9, math 165.7, JSON 170.6) |
-| Decode, two streams | 112.3 tok/s each, 178.5 tok/s together |
-| Decode, thinking on, sampled | prose 69.0, chat 78.7 tok/s |
-| Prefill | 2,866 tok/s at 9k, 2,594 at 31k, 1,783 at 124k, all uncached |
+| Decode, one stream | **118.0 tok/s** streamed (prose 75.0, chat 83.6, translation 78.4, summary 98.1, code 162.5, math 154.0, JSON 174.7); the stock AWQ checkpoint, same hour, 120.0 |
+| Decode, two streams | 110.1 tok/s each, 177.4 tok/s together |
+| Decode, thinking on, sampled | prose 66.3, chat 80.5 tok/s (stock: 68.3, 77.8) |
+| Prefill | 2,760 tok/s at 9k, 2,603 at 31k, 1,781 at 124k, all uncached |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), BF16 3.72 GiB, block drafting at 8 |
 | Engine | SGLang v0.5.20, the stock `lmsysorg/sglang:v0.5.20` image |
 | Attention | FlashInfer for target and draft; FlashInfer GDN kernels for prefill |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell: 47.64 GiB of 96, SM120 |
 | Structured output | off (`--grammar-backend none`): `response_format` and forced tool calls get a 400, because with it on either one kills the server |
-| Quality | needle retrieval 5/5 at 30k and 120k, 12/12 multi-step math with thinking; 64/64 checked answers still right at two and three concurrent streams |
+| Quality | needle retrieval 5/5 at 30k and 120k, 12/12 multi-step math with thinking; 64/64 checked answers still right at two concurrent streams |
 | Vision | native, preprocessed on the GPU; input bounded to 1,024 image tokens |
-| Cold start | ~11 min to first token; 0 s in practice, held warm by `minScale: '1'` |
+| Cold start | ~12 min to first token; 0 s in practice, held warm by `minScale: '1'` |
 
 The repository name is from the first deployment, which served NVFP4. [The checkpoint](#the-checkpoint)
-explains the switch.
+explains the move to AWQ-INT4, and [Abliterated](#abliterated) the move to the abliterated weights.
 
 Decode is `scripts/bench2.py`: each answer is streamed and timed from its first token to its last,
 `(tokens - 1) / (t_last - t_first)`, two prompts per workload at up to 800 tokens, greedy with
 thinking off unless stated. Two streams is `scripts/bench3.py`, the same fourteen prompts pushed
 through two connections at once. Prefill is time to first token over prompts of unique random
 words, so the radix cache cannot serve them. Quality is `scripts/quality.py`, fidelity
-`scripts/fid.py`, concurrency `scripts/qcon.py`.
+`scripts/fid.py`, concurrency `scripts/qcon.py`, refusals `scripts/refusal.py`.
 
 ```bash
 bash docker/build.sh                 # mirror lmsysorg/sglang:v0.5.20 into Artifact Registry
+gcloud alpha run services replace quant/service.yaml     # once: quantize into the bucket (~75 min)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
 
@@ -117,6 +119,59 @@ read. Over 143 agent runs on this deployment a turn adds about 2,300 new prompt 
 from the growth of its context) and generates 1,223 on average, which makes decode over 90% of GPU
 time on either checkpoint, so the decode gain outweighs the prefill loss. Where the loss shows is
 a long first prompt: a 31k-token document waits about 12 s for its first token instead of 6.
+
+## Abliterated
+
+The deployment serves huihui-ai's abliterated Qwen3.8-27B: the direction in the residual stream
+that mediates refusals is projected out of the weights, so the model answers what the stock one
+declines. `scripts/refusal.py` sends six borderline prompts (a profane roast, lock picking, a
+paywall question and so on) with thinking off; the stock AWQ checkpoint refused five, this one
+none.
+
+Two published 4-bit builds of an abliterated Qwen3.8-27B exist, and neither drops in:
+
+| | Format | Weights | KV pool at 2 slots | Decode, mean of seven | Vision |
+| --- | --- | ---: | ---: | ---: | --- |
+| `TelperionAI/Huihui-Qwen3.8-27B-abliterated-INT4-AWQ-GPTQ` | INT4 MLP, INT8 attention and last 8 MLPs | 25.1 GB | 110,391 | 105.1 | yes |
+| `hotdogs/Qwen3.8-27B-abliterated-AWQ-INT4` | INT4 symmetric, group 128 | 17.6 GB | | | no |
+| **this deployment** | INT4 asymmetric, group 32 (cyankiwi's) | 21.0 GB | **202,065** | **118.0** | yes |
+
+TelperionAI's INT8 layers cost half the context and 14% of decode; hotdogs is text-only, and its
+coarser grouping is the kind that measured furthest from FP8 above. So the abliterated BF16
+checkpoint is quantized here with cyankiwi's recipe, read off their `config.json` (they do not
+publish the recipe itself): AWQ, INT4, asymmetric, group 32, the `mse` observer, every `Linear`
+except `lm_head`, the vision tower, the MTP head, `linear_attn.in_proj_a/b` and layer 0's
+`linear_attn.out_proj`. Calibration is cyankiwi's public `calibration` set, 384 agentic and STEM
+conversations in ten languages (their card names `calibration-medium`, which is private),
+truncated to 2,048 tokens: 380,221 tokens. The output has the same 2,396 tensors as cyankiwi's
+checkpoint, under the same names, in the same formats.
+
+`quant/quant.py` is the run, with llm-compressor 0.14 and its hybrid-attention AWQ mappings.
+It ran on a whole RTX PRO 6000 (`quant/service.yaml`): 64 minutes of calibration, 71 with the
+save. Two things about the setup are not obvious. The model stays in CPU memory and llm-compressor
+moves one layer at a time to the GPU: with all 55 GB resident on the 96 GB card, layer 3, the
+first full-attention layer, ran out of memory. And it is a service rather than a job, because
+Cloud Run caps GPU jobs at one hour.
+
+Against the stock AWQ checkpoint on the same card. The two one-stream decode rows are three runs
+of each, interleaved in one hour (sampled: their mean); the other rows are one run each, and the
+stock two-stream and prefill figures are from the day before:
+
+| | Stock AWQ (cyankiwi) | Abliterated AWQ |
+| --- | ---: | ---: |
+| Decode, mean of seven, greedy | 120.2 / 120.0 / 120.0 | 118.0 / 118.0 / 117.6 |
+| Decode, thinking on, sampled (prose, chat) | 68.3, 77.8 | 66.3, 80.5 |
+| Two streams, together | 178.5 | 177.4 |
+| Prefill at 9k / 31k / 124k | 2,866 / 2,594 / 1,783 | 2,760 / 2,603 / 1,781 |
+| KL to FP8 reference, all / Chinese | 0.0466 / 0.0935 | 0.0544 / 0.1067 |
+| Perplexity on the corpus | 7.979 | 7.966 |
+
+Greedy decode is 1.9% slower, consistently, and almost all of it is math (-7%), prose (-5%) and
+code (-3%); chat and summaries are faster. The drafter was trained on the stock model's outputs,
+and the abliterated target accepts its blocks a little less often where text is most predictable.
+With thinking on and sampling, which is how the deployment is used, and at two streams, the two
+are level within run-to-run variation. The fidelity numbers measure distance from the stock
+model, so they include the abliteration itself, not only quantization error.
 
 ## Two slots
 
@@ -309,12 +364,21 @@ shipped configuration.
 | `--chunked-prefill-size 8192` | Prefill -1% to +3% against 4096, and more activation memory. |
 | `--speculative-draft-window-size 2048` | The drafter attends to 2,048 tokens anyway, and its KV pool stays sized to the full context, so nothing is freed. |
 | Draft block 12 or 16 with the block-8 drafter | Best case up, median flat, prose slower (helix.ml's measurement on the same model). |
+| TelperionAI's abliterated INT4/INT8 checkpoint | 105.1 tok/s and a 110,391-token pool at two slots (above). |
+| Loading the target straight off the gcsfuse mount | 849 s for the target alone; a 32-thread copy to local disk first, 400 s; the storage client's ranged downloads, 471 s with the drafter. |
 
 ## Serving
 
 `cloudrun/service.yaml` is the deployed configuration. Three things about it are Cloud Run's rather
 than SGLang's: the container must listen on 8080, `gpu-zonal-redundancy-disabled` must be `'true'`
 or the deploy hangs, and `minScale: '1'` is load-bearing for the reason the next section measures.
+
+The weights come from a bucket (`BUCKET` in both yaml files): `quant/service.yaml` writes the
+quantized checkpoint to `huihui-awq/out/`, the drafter is copied once to `dflash2/`, and
+`cloudrun/gcsdl.py` sits at the bucket's root. Both services' accounts need object access on that
+bucket, and the quantization run a Hugging Face token: anonymous downloads from Cloud Run hit 429
+and `snapshot_download` then returns a partial directory without failing, which `quant/job.sh`
+checks for.
 
 `--max-model-len` has no counterpart here, but the equivalent trap does: SGLang validates
 `input + completion ≤ context` and returns 400, where llama.cpp clamps. A client that asks for the
@@ -323,27 +387,30 @@ as context overflow will compact, retry and fail. Cap the completion.
 
 ## Cold start
 
-From the instance starting to the first token is 666 s, read off the startup log's own
+From the instance starting to the first token is 720 s, read off the startup log's own
 timestamps:
 
 | Phase | Seconds |
 | --- | ---: |
-| Schedule, image pull, import | 45 |
-| Target weights from Hugging Face | 374 |
-| Drafter weights | 56 |
-| State and KV pools | 2 |
-| Autotune and prefill CUDA graph | 169 |
-| Verify CUDA graphs | 10 |
-| Warmup | 8 |
+| Instance start to download start (`pip install google-cloud-storage`) | 10 |
+| Target and drafter weights from the bucket, 24.9 GB (`cloudrun/gcsdl.py`) | 471 |
+| Target weights into the GPU | 10 |
+| Drafter weights into the GPU | 0.5 |
+| State and KV pools, autotune, CUDA graphs, warmup | 190 |
 
-Downloading and loading weights is two thirds of it. The prefill graph takes 169 s here against
-27 s on the NVFP4 build.
+The weights live in a bucket in the service's region, not on Hugging Face. Anonymous Hub downloads
+from Cloud Run share egress addresses and were rate-limited within minutes, and the drafter's
+download took 56 s on one boot and 363 s on another. Loading the target straight off the gcsfuse
+mount took 849 s, because safetensors reads through the mount in small pieces; `gcsdl.py` copies
+both models to local disk with the storage client's ranged parallel downloads first, and loading
+from there takes ten seconds.
 
 `minScale: '1'` turns cold start from a user-facing cost into a deploy-time one: the instance is
 never reaped, so no request meets it, and it is only paid when a revision is replaced. It is not a
-tuning preference - with `maxScale: '1'` and no warm instance, every request during those eleven
-minutes is answered with *no available instance*. Baking the weights into the image would replace
-the Hugging Face pull with an in-region Artifact Registry pull; its saving is unmeasured.
+tuning preference - with `maxScale: '1'` and no warm instance, every request during those twelve
+minutes is answered with *no available instance*. At 53 MB/s the download is the
+largest phase; baking the weights into the image would replace it with an Artifact Registry pull,
+whose speed is unmeasured.
 
 ## Reproducing
 
@@ -357,6 +424,7 @@ python3 scripts/quality.py $U            # needle at 30k/120k, 12 math problems
 python3 scripts/qcon.py    $U out.json 2 # 64 checked answers alone and at 2 streams
 python3 scripts/stall.py   $U 1 40000    # one stream decoding while a ~124k prompt arrives
 python3 scripts/apitest.py $U image.png  # structured output, tool calls, cache report, 1 MP image
+python3 scripts/refusal.py $U [$U2]      # six borderline prompts, refusals counted per server
 python3 scripts/fid.py dump $U corpus.json out.json.gz   # then: fid.py cmp ref.json.gz out.json.gz
 ```
 
@@ -365,8 +433,11 @@ python3 scripts/fid.py dump $U corpus.json out.json.gz   # then: fid.py cmp ref.
 The serving recipe follows [`MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark`](https://github.com/MiaAI-Lab/Qwen3.8-27B-RTX-6000-PRO-SGLang-DSpark),
 which worked out the flags and the memory budget for the full card. DFlash 2 is
 [z-lab/dflash](https://github.com/z-lab/dflash); the drafter card is
-[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The checkpoint is
-[`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4); the
-shootout in [discussion #192](https://huggingface.co/Qwen/Qwen3.8-27B/discussions/192) is where it
-came up as a candidate. The L4 companion to this deployment is
+[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The weights are
+[`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated),
+quantized with the recipe and calibration set of
+[`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) through
+[llm-compressor](https://github.com/vllm-project/llm-compressor); the shootout in
+[discussion #192](https://huggingface.co/Qwen/Qwen3.8-27B/discussions/192) is where cyankiwi's
+checkpoint came up as a candidate. The L4 companion to this deployment is
 [`Qwen3.8-27B-UD-Q4_K_XL-L4`](https://github.com/hanxiao/Qwen3.8-27B-UD-Q4_K_XL-L4).
