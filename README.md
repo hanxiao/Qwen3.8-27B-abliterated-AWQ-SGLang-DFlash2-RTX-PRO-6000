@@ -5,7 +5,7 @@
 | Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
 | Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
-| Engine | SGLang v0.5.20, the stock `lmsysorg/sglang:v0.5.20` image, FlashInfer attention and GDN prefill kernels |
+| Engine | SGLang v0.5.20, the `lmsysorg/sglang:v0.5.20` image with a streaming tool-call parser, FlashInfer attention and GDN prefill kernels |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
 | Slots | 2 concurrent requests |
 | Context | 262,144 native, **237,265** usable per request; one 237,271-token FP8 KV pool shared by both slots |
@@ -17,6 +17,7 @@
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64/64 checked answers at two concurrent streams |
 | Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
 | Structured output | disabled: `response_format` and `tool_choice: "required"` return 400 |
+| Tool calls | arguments stream as they are generated, at most 0.1 s apart |
 | Cold start | 12 min; the service keeps one instance warm |
 
 We time decode with `scripts/bench2.py`, which streams each answer and divides its tokens after
@@ -26,7 +27,7 @@ prompts over two connections at once. Prefill is time to first token on prompts 
 words, so no prefix is cached.
 
 ```bash
-bash docker/build.sh                                  # mirror lmsysorg/sglang:v0.5.20 into Artifact Registry
+bash docker/build.sh                                  # lmsysorg/sglang:v0.5.20 + streaming tool calls, into Artifact Registry
 gcloud alpha run services replace quant/service.yaml  # once: quantize into the bucket (~75 min)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
@@ -206,6 +207,38 @@ regex, ebnf, structural_tag) is not supported*, and the server stays up. Ordinar
 use the grammar and parse on both the OpenAI and the Anthropic endpoints. Clients that need JSON
 ask for it in the prompt and validate the answer.
 
+## Tool calls
+
+The `qwen3_coder` parser of SGLang v0.5.20 converts every parameter to the type in the tool's
+schema, and so holds each parameter until its `</parameter>` tag. A call that writes a file sends
+its name and then nothing until the last line of the file is generated. Agent clients put an idle
+timeout on the stream, five minutes by default in pi, and drop a longer write, then retry it from
+the start with the same result.
+
+We serve the parser of [sglang PR #25246](https://github.com/sgl-project/sglang/pull/25246),
+ported to v0.5.20 (`docker/`). It streams string parameters as they are generated and converts
+the others when they close, as before. `scripts/toolstream.py` asks for one `write` of the
+integers 1 to 3,000, 16,931 characters of arguments:
+
+| Parser | Pieces | Longest silence | Call |
+| --- | ---: | ---: | ---: |
+| v0.5.20 | 4 | 64.2 s | 64.2 s |
+| **streaming** | **1,744** | **0.1 s** | 64.0 s |
+
+The OpenAI endpoint gives the same numbers within one piece and 0.1 s, and on both the assembled
+arguments equal the requested content exactly. Generation is as fast as before.
+
+The PR predates v0.5.20 and does not run on it as written. It adds a second `_get_param_type`,
+which replaces the one v0.5.20 uses for the final conversion, so every non-streaming parse fails.
+The port decides what to stream with v0.5.20's own type inference, so that a typed `anyOf`
+parameter is converted rather than streamed as a string. It also keeps two behaviours of the
+non-streaming path that the PR changes: `null` becomes JSON null for every type, and only the
+first newline after the tag is dropped, however the value is chunked. `docker/test_stream.py`
+checks that the content streams before its closing tag and that every streamed call equals the
+non-streaming parse of the same text, for eight calls at chunk sizes from 1 to 4,096 characters.
+The image build runs it on the stock parser, which must fail, and on the port, together with
+SGLang's own Qwen3 Coder tests.
+
 ## Prefill
 
 48 of the 64 layers are gated delta net (GDN) layers. SGLang selects the FlashInfer GDN prefill
@@ -293,7 +326,9 @@ configuration above.
 `cloudrun/service.yaml` is the deployed configuration. Cloud Run requires the container to listen
 on 8080 and `gpu-zonal-redundancy-disabled: 'true'` for the deploy to complete. The service runs
 with `minScale: '1'` and `maxScale: '1'`, so one instance stays warm, no request waits for a cold
-start, and the cold start is paid only when a revision is replaced.
+start, and the cold start is paid only when a revision is replaced. `timeoutSeconds: 3600`, the
+maximum, lets one request run for an hour: an agent turn that writes a long file in a single tool
+call takes many minutes, and the default of 600 s ended such turns.
 
 The weights come from a bucket in the same region (`BUCKET` in both yaml files).
 `quant/service.yaml` writes the quantized checkpoint to `huihui-awq/out/`, the drafter is copied
@@ -333,6 +368,7 @@ python3 scripts/quality.py $U                # needle at 30k/120k, 12 math probl
 python3 scripts/qcon.py    $U out.json 2     # 64 checked answers alone and at 2 streams
 python3 scripts/stall.py   $U 1 40000        # one stream decoding while a ~124k prompt arrives
 python3 scripts/apitest.py $U image.png      # structured output, tool calls, cache report, 1 MP image
+python3 scripts/toolstream.py $U 3000        # do a long tool call's arguments stream while generated
 python3 scripts/refusal.py $U [$U2]          # six borderline prompts, refusals per server
 python3 scripts/fid.py dump $U corpus.json out.json.gz   # then: fid.py cmp ref.json.gz out.json.gz
 ```

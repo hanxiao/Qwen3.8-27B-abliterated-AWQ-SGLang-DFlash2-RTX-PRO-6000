@@ -31,14 +31,17 @@ spec:
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
       containerConcurrency: 4
-      timeoutSeconds: 600
+      # Cloud Run's maximum. A request is one model turn, and an agent turn that writes a long
+      # file in one tool call runs for many minutes; at 600 Cloud Run cut such turns off.
+      timeoutSeconds: 3600
       serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
-        # Stock lmsysorg/sglang:v0.5.20, mirrored by docker/build.sh. DFlash 2 is upstream since
-        # v0.5.19; the old overlay image had sglang#37817 (stale GDN state on prefix-cache hits).
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20
+        # lmsysorg/sglang:v0.5.20 with the streaming qwen3_coder tool-call parser, built by
+        # docker/build.sh. DFlash 2 is upstream since v0.5.19; the old overlay image had
+        # sglang#37817 (stale GDN state on prefix-cache hits).
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20-stream
           ports:
             - name: http1
               containerPort: 8080
