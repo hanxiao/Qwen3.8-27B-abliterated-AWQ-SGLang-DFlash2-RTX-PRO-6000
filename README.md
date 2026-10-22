@@ -5,20 +5,21 @@
 | Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
 | Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
-| Engine | SGLang v0.5.22, the `lmsysorg/sglang:v0.5.22` image with four patches (`docker/`), FlashInfer attention and GDN prefill kernels |
+| Engine | SGLang v0.5.22, the `lmsysorg/sglang:v0.5.22` image with five patches (`docker/`), FlashInfer attention and GDN prefill kernels |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
 | Slots | 2 concurrent requests |
 | Context | **262,144** native and usable per request; one 314,365-token FP8 KV pool shared by both slots |
-| Decode, one stream | **133.9 tok/s** (prose 85.4, chat 92.6, translation 94.7, summary 112.0, code 184.0, math 173.7, JSON 194.7) |
-| Decode, two streams | 127.2 tok/s each, 202.8 tok/s in total |
-| Decode, thinking on, sampled | 125.1 tok/s over fourteen prompts, 3.70 tokens per verification |
-| Decode deep in a context | 68.8 tok/s at 34k tokens, 61.3 at 115k |
-| Prefill | 2,830 tok/s at 9k tokens, 2,622 at 31k, 1,794 at 124k |
+| Decode, one stream | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
+| Decode, two streams | 133.5 tok/s each, 208.5 tok/s in total |
+| Decode, thinking on, sampled | 126.5 tok/s over fourteen prompts (mean of three runs), 3.60 tokens per verification |
+| Decode deep in a context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
+| Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
 | Refusals | 0 of 6 borderline prompts, against 5 of 6 for the stock model |
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64/64 checked answers at two concurrent streams |
 | Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
 | Structured output | disabled: `response_format` and `tool_choice: "required"` return 400 |
 | Tool calls | arguments stream as they are generated, at most 0.1 s apart |
+| Client hang-up | aborts the request within a second (HTTP/2 to the container) |
 | Cold start | 12 min; the service keeps one instance warm |
 
 We time decode with `scripts/bench2.py`, which streams each answer and divides its tokens after
@@ -28,7 +29,7 @@ prompts over two connections at once. Prefill is time to first token on prompts 
 words, so no prefix is cached.
 
 ```bash
-bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + four patches, into Artifact Registry
+bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + five patches, into Artifact Registry
 gcloud alpha run services replace quant/service.yaml  # once: quantize into the bucket (~75 min)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
@@ -205,9 +206,44 @@ and 24 long sampled answers with a mean zlib ratio of 0.417 and no loop (`script
 
 Deep in a context the drafter commits fewer tokens per step. With 34k and 115k tokens of random
 words before the question (`scripts/longdecode.py`), greedy decode is 66.4 and 57.0 tok/s on v0.5.20
-at 2.53 and 2.39 tokens per verification, and 68.8 and 61.3 tok/s with all three changes. Agent
+at 2.53 and 2.39 tokens per verification, 68.8 and 61.3 tok/s with all three changes, and 75.5
+and 65.8 tok/s with the int8 draft head below. Agent
 traffic, with real text in its context, commits 3.94 tokens per verification at a median of 115k
 tokens.
+
+### Draft head
+
+A torch profile of 30 decode steps of one greedy answer (`/start_profile`) puts a step at 35.4 ms:
+
+| | ms per step |
+| --- | ---: |
+| Target layers, INT4 (Marlin) | 19.8 |
+| `lm_head`, BF16, read twice: draft candidates and verification | 6.7 |
+| Drafter layers, FP8 | 2.7 |
+| GDN replay and convolution | 1.4 |
+| Other kernels | 2.6 |
+| GPU idle between launches | 2.2 |
+
+The drafter uses `lm_head` only to rank candidates, and the target verifies every token with its
+own BF16 head, so a cheaper copy for the draft changes which tokens are proposed and not the
+distribution of the output. `docker/dflash_qhead.py` gives the draft an int8 copy with one scale
+per vocabulary row (`SGLANG_DFLASH_DRAFT_HEAD=int8`). A Triton kernel reads it in 1.68 ms against
+3.35 ms for the BF16 head at the seven rows of a draft block, both at the card's ~760 GB/s. The
+copy takes 1.27 GB out of the memory left after the pools, which keep their size. Measured in the
+same hour against a service that differs only in the head:
+
+| | BF16 draft head | int8 draft head |
+| --- | ---: | ---: |
+| Decode, greedy, mean of seven | 133.6 | **141.2** |
+| Decode, sampled, per run | 119.0, 119.5 | **124.7, 128.7, 126.0** |
+| Tokens per verification, sampled | 3.50, 3.59 | 3.63, 3.60, 3.57 |
+
+Greedy answers to the 24 drift prompts are identical on 22 of 24 between the two heads, and on 24
+of 24 between two runs of the int8 head. Measured and not adopted: an int4 copy (1.23 ms, 12%
+relative error) decodes the same as int8 within noise; giving DFlash's fused draft-KV path BF16
+weights dequantized from the FP8 drafter changes nothing measurable; and the 48 small BF16
+`in_proj_ba` GEMMs per step, slow on cuBLAS at 58 µs each, already run on a side stream under the
+Marlin GEMM and add 0.04 ms to a step.
 
 ## Concurrency
 
@@ -222,15 +258,15 @@ single request keeps its full 262k tokens of context.
 
 | Streams | Per stream | Total |
 | ---: | ---: | ---: |
-| 1 | 133.9 tok/s | 133.9 tok/s |
-| 2 | 127.2 tok/s | 202.8 tok/s |
+| 1 | 141.0 tok/s | 141.0 tok/s |
+| 2 | 133.5 tok/s | 208.5 tok/s |
 
 DFlash 2 has an open report of wrong answers, and of prompts appearing in other conversations,
 under concurrent load (sglang#36548). `scripts/qcon.py` runs 64 problems with checkable answers,
 three-step arithmetic and four-person ordering puzzles, greedy with thinking on. It runs them once
 alone and once at two streams, interleaved with unrelated essay and code requests. All 64 answers
 are right in both runs, and no answer contains a word from the interleaved requests. The answer
-text differs between the runs, with 31 of 64 byte-identical, because a verify batch of a different
+text differs between the runs, with 29 of 64 byte-identical, because a verify batch of a different
 size rounds differently.
 
 SGLang schedules a waiting prefill ahead of decode, so a long prompt that arrives while the other
@@ -339,7 +375,8 @@ only, and the recurrent state has no gauge, so we account for memory from the st
 | KV pool, target (16 full-attention layers) | -9.60 | **12.06** | `K size: 4.80 GB, V size: 4.80 GB` |
 | KV pool, drafter (5 layers) | -3.00 | **9.06** | `K size: 1.50 GB, V size: 1.50 GB` |
 | Autotune and prefill CUDA graph | -2.54 | 6.52 | `Capture target prefill CUDA graph end ... avail mem=6.52` |
-| Verify CUDA graphs | -0.12 | **6.40** | `available_gpu_mem=6.40` |
+| Draft head, int8 | -1.21 | 5.31 | `DFLASH quantized draft head: int8, 248320 x 5120, 1.27 GB` |
+| Verify CUDA graphs | -0.10 | **5.21** | `available_gpu_mem=5.21` |
 
 The model has `head_dim` 256 and 4 KV heads, so a token of FP8 KV takes `2 × 4 × 256 = 2 KiB` per
 layer: 32 KiB over the 16 full-attention layers of the target and 10 KiB over the 5 layers of the
@@ -396,6 +433,13 @@ services need object access on the bucket. The quantization run needs a Hugging 
 anonymous downloads from Cloud Run are rate-limited and `snapshot_download` then returns a partial
 directory without an error; `quant/job.sh` checks the shard sizes.
 
+Cloud Run talks HTTP/2 to the container (port name `h2c`, SGLang's `--enable-http2`, served by
+Granian), whatever the client speaks. Over HTTP/1.1 the front end kept the backend request alive
+after the client hung up, so a stopped agent run held its slot until its answer finished: a
+streamed answer cut after 3 s kept running for the remaining 23 s. Over HTTP/2 the hang-up arrives
+as a stream reset and SGLang aborts the request within a second (`scripts/disconnect.py`: 0.2 and
+0.9 s). Decode is the same under either server (140.8 and 141.2 tok/s greedy).
+
 SGLang returns 400 when the prompt plus `max_tokens` exceeds the context. A client that requests
 the whole 262,144-token window as completion is refused, so clients cap the completion length.
 
@@ -433,6 +477,7 @@ python3 scripts/prefix.py  $U                # facts recalled across a conversat
 python3 scripts/degen.py   $U                # 24 long sampled answers checked for loops
 python3 scripts/drift.py run $U a.json       # greedy answers, to compare two builds (drift.py cmp)
 python3 scripts/admission.py $U              # a short request beside a long prefill
+python3 scripts/disconnect.py $U             # does a client that hangs up free its slot
 python3 scripts/toolstream.py $U 3000        # do a long tool call's arguments stream while generated
 python3 scripts/refusal.py $U [$U2]          # six borderline prompts, refusals per server
 python3 scripts/fid.py dump $U corpus.json out.json.gz   # then: fid.py cmp ref.json.gz out.json.gz

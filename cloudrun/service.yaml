@@ -38,12 +38,16 @@ spec:
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
-        # lmsysorg/sglang:v0.5.22 with four patches, built by docker/build.sh (see the Dockerfile).
-        # DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817 (stale GDN
-        # state on prefix-cache hits).
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched
+        # lmsysorg/sglang:v0.5.22 with five patches and Granian, built by docker/build.sh (see the
+        # Dockerfile). DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817
+        # (stale GDN state on prefix-cache hits).
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched2
+          # h2c: Cloud Run speaks HTTP/2 to the container (served by Granian, --enable-http2), so a
+          # client that hangs up reaches SGLang as a stream reset and its request is aborted within
+          # a second. Over HTTP/1.1 the front end kept the backend request alive, and a stopped run
+          # held its slot until its answer finished. Clients keep using HTTP/1.1 or HTTP/2.
           ports:
-            - name: http1
+            - name: h2c
               containerPort: 8080
           # Images are preprocessed on the GPU, and the input is bounded so that the
           # allocation is bounded with it. Qwen2-VL's processor resizes rather than rejects:
@@ -135,8 +139,14 @@ spec:
               --enable-cache-report
               --speculative-use-block-verification
               --enable-linear-replayssm-spec
+              --enable-http2
               --api-key "$SGLANG_API_KEY"
           env:
+            # DFlash scores its draft candidates with an int8 copy of lm_head (docker/dflash_qhead.py)
+            # instead of reading the 2.54 GB BF16 head a second time each step; verification keeps
+            # the BF16 head. Decode +6%; 1.27 GB, taken from the memory left after the pools.
+            - name: SGLANG_DFLASH_DRAFT_HEAD
+              value: int8
             - name: SGLANG_API_KEY
               valueFrom:
                 secretKeyRef:
