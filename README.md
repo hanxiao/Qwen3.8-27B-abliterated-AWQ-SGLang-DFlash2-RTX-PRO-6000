@@ -185,7 +185,9 @@ every step.
 
 Each column adds to the one before it. Sampled decode is fourteen prompts with thinking on
 (`scripts/accept.py`), whose tokens per verification come from the server's counters; greedy is
-`scripts/bench2.py`.
+`scripts/bench2.py`. Sampled decode varies by a few percent between runs: the ReplaySSM column is
+the mean of 120.9 and 116.0, while the counters agreed to 3.555 and 3.542. The rounding fix was
+measured in the same hour as the 116.0 run.
 
 | | v0.5.20 | v0.5.22, block verification | + ReplaySSM | + rounding fix, 12 state slots |
 | --- | ---: | ---: | ---: | ---: |
