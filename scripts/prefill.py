@@ -43,4 +43,5 @@ def prefill():
 
 
 
-prefill()
+if __name__ == "__main__":  # longdecode.py imports words()
+    prefill()

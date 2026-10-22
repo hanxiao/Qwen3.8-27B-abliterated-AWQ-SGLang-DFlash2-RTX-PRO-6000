@@ -49,17 +49,18 @@ def stream(prompt, thinking=False, sampled=False, max_tokens=800):
     return (toks - 1) / (last - first) if last and last > first else float("nan"), toks
 
 
-stream("hi", max_tokens=8)
-res = {}
-for rnd in range(ROUNDS):
-    for name, ps in W.items():
-        for p in ps:
-            res.setdefault(name, []).append(stream(p))
-tot = []
-for name, v in res.items():
-    rate = sum(t for t, _ in v) / len(v); tot.append(rate)
-    print(f"  {name:12} {rate:6.1f} tok/s   tokens {[n for _, n in v]}", flush=True)
-print(f"  {'mean':12} {sum(tot) / len(tot):6.1f} tok/s", flush=True)
-for name in ("prose", "chat"):
-    v = [stream(p, thinking=True, sampled=True, max_tokens=1200) for p in W[name]]
-    print(f"  {name:5} thinking+sampled {sum(t for t, _ in v) / len(v):6.1f} tok/s   tokens {[n for _, n in v]}", flush=True)
+if __name__ == "__main__":  # accept.py imports the prompts and stream()
+    stream("hi", max_tokens=8)
+    res = {}
+    for rnd in range(ROUNDS):
+        for name, ps in W.items():
+            for p in ps:
+                res.setdefault(name, []).append(stream(p))
+    tot = []
+    for name, v in res.items():
+        rate = sum(t for t, _ in v) / len(v); tot.append(rate)
+        print(f"  {name:12} {rate:6.1f} tok/s   tokens {[n for _, n in v]}", flush=True)
+    print(f"  {'mean':12} {sum(tot) / len(tot):6.1f} tok/s", flush=True)
+    for name in ("prose", "chat"):
+        v = [stream(p, thinking=True, sampled=True, max_tokens=1200) for p in W[name]]
+        print(f"  {name:5} thinking+sampled {sum(t for t, _ in v) / len(v):6.1f} tok/s   tokens {[n for _, n in v]}", flush=True)

@@ -5,14 +5,15 @@
 | Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
 | Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
-| Engine | SGLang v0.5.20, the `lmsysorg/sglang:v0.5.20` image with a streaming tool-call parser, FlashInfer attention and GDN prefill kernels |
+| Engine | SGLang v0.5.22, the `lmsysorg/sglang:v0.5.22` image with four patches (`docker/`), FlashInfer attention and GDN prefill kernels |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
 | Slots | 2 concurrent requests |
-| Context | 262,144 native, **237,265** usable per request; one 237,271-token FP8 KV pool shared by both slots |
-| Decode, one stream | **123.7 tok/s** (prose 79.1, chat 86.3, translation 82.8, summary 103.4, code 172.0, math 160.8, JSON 181.7) |
-| Decode, two streams | 115.2 tok/s each, 183.3 tok/s in total |
-| Decode, thinking on, sampled | prose 74.2, chat 84.3 tok/s |
-| Prefill | 2,811 tok/s at 9k tokens, 2,597 at 31k, 1,782 at 124k |
+| Context | **262,144** native and usable per request; one 314,365-token FP8 KV pool shared by both slots |
+| Decode, one stream | **133.9 tok/s** (prose 85.4, chat 92.6, translation 94.7, summary 112.0, code 184.0, math 173.7, JSON 194.7) |
+| Decode, two streams | 127.2 tok/s each, 202.8 tok/s in total |
+| Decode, thinking on, sampled | 125.1 tok/s over fourteen prompts, 3.70 tokens per verification |
+| Decode deep in a context | 68.8 tok/s at 34k tokens, 61.3 at 115k |
+| Prefill | 2,830 tok/s at 9k tokens, 2,622 at 31k, 1,794 at 124k |
 | Refusals | 0 of 6 borderline prompts, against 5 of 6 for the stock model |
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64/64 checked answers at two concurrent streams |
 | Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
@@ -27,7 +28,7 @@ prompts over two connections at once. Prefill is time to first token on prompts 
 words, so no prefix is cached.
 
 ```bash
-bash docker/build.sh                                  # lmsysorg/sglang:v0.5.20 + streaming tool calls, into Artifact Registry
+bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + four patches, into Artifact Registry
 gcloud alpha run services replace quant/service.yaml  # once: quantize into the bucket (~75 min)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
@@ -40,6 +41,12 @@ Engine. Each has its own quota: `run.googleapis.com` grants milliGPUs, of which 
 Cloud Run grant with no Compute Engine quota at all. Cloud Run accepts 0.5 or 1 for
 `nvidia.com/gpu`. The half card presents 47.64 GiB and takes 10 to 16 vCPU with 40 to 64 GiB of
 system memory.
+
+The half card is a MIG `2g.48gb` partition: 94 of the 188 SMs, 765 GB/s of measured read bandwidth
+(1,524 GB/s on the whole card) and 177 dense BF16 TFLOPS (412). A decode step reads about 23 GB of
+weights, the target's 20.5 and the drafter's 2.7, so bandwidth alone sets 30 ms per step. Decode
+therefore runs close to its limit, and gains come from committing more tokens per step or reading
+fewer bytes per step. Prefill at 9k tokens computes about 145 TFLOP/s, 82% of the BF16 peak.
 
 ## Checkpoint
 
@@ -152,29 +159,76 @@ English and Chinese to both services with thinking on, the thinking returned inl
 up to 4,000 tokens. The mean zlib compression ratio of the answers is 0.391 with the BF16 drafter and 0.399 with FP8, the same
 13 answers reach the length limit on both, and no answer falls into a loop.
 
+### Verification
+
+Three changes to how drafts are verified raise decode without changing the distribution the model
+samples from.
+
+**Block verification** (`--speculative-use-block-verification`, [Sun et al.,
+2024](https://arxiv.org/abs/2403.10444)). Token-wise verification stops at the first rejected draft
+token; block verification can still accept a longer prefix, with a correction that keeps the
+target distribution. It acts on sampled requests only.
+
+**Draft probabilities that round above 1** (`docker/draft_prob_round.py`, sglang PR #45819). The
+sampled verification kernel treats a draft token whose probability exceeds 1.0 as impossible and
+rejects it. An fp32 softmax over a peaked row returns 1.0 plus a few units in the last place, so the
+drafts the drafter was surest of were always rejected. The kernel now accepts probabilities up to
+1 + 10⁻³ and clamps them to 1.
+
+**ReplaySSM** (`--enable-linear-replayssm-spec`, [arXiv 2610.13778](https://arxiv.org/abs/2610.13778)).
+To roll back a rejected draft, verification stores the recurrent state of all 48 GDN layers at
+each of the 8 drafted positions, 1.2 GB per request written on every step. ReplaySSM stores compact
+records of the recurrence inputs instead and replays the accepted prefix into the checkpoint.
+SGLang v0.5.22 runs it for MTP drafts; `docker/replayssm_dflash.py` routes the DFlash commit through
+it (from sglang PR #35725). It frees the 3.38 GB intermediate-state cache and the state writes of
+every step.
+
+Each column adds to the one before it. Sampled decode is fourteen prompts with thinking on
+(`scripts/accept.py`), whose tokens per verification come from the server's counters; greedy is
+`scripts/bench2.py`.
+
+| | v0.5.20 | v0.5.22, block verification | + ReplaySSM | + rounding fix, 12 state slots |
+| --- | ---: | ---: | ---: | ---: |
+| Tokens per verification, sampled | 3.39 | 3.56 | 3.55 | **3.70** |
+| Decode, sampled | 108.3 | 112.8 | 118.5 | **125.1** |
+| Decode, greedy, mean of seven | 123.7 | 124.6 | 133.9 | **133.9** |
+| KV pool, two slots | 237,271 | 237,384 | 321,526 | 314,365 |
+
+ReplaySSM rounds the replayed states differently from stored ones. Greedy answers to 24 prompts
+(`scripts/drift.py`) are identical when one server answers them twice, 24 of 24, and 10 of 24 match
+between verification with and without ReplaySSM; SGLang v0.5.20 and v0.5.22 match on 9. The quality
+checks do not change: needle retrieval 5/5 at 30k and 120k, math 12/12, 64/64 checked answers at two
+streams, ten facts recalled across a conversation served from the prefix cache (`scripts/prefix.py`),
+and 24 long sampled answers with a mean zlib ratio of 0.417 and no loop (`scripts/degen.py`).
+
+Deep in a context the drafter commits fewer tokens per step. With 34k and 115k tokens of random
+words before the question (`scripts/longdecode.py`), greedy decode is 66.4 and 57.0 tok/s on v0.5.20
+at 2.53 and 2.39 tokens per verification, and 68.8 and 61.3 tok/s with all three changes. Agent
+traffic, with real text in its context, commits 3.94 tokens per verification at a median of 115k
+tokens.
+
 ## Concurrency
 
-Every running request needs its own recurrent state and, under speculation, the intermediate
-states of every drafted position so that a rejected draft can be rolled back. Both come out of the
-memory that would otherwise hold the KV pool. Each slot costs 1.83 GiB, 0.70 GiB for five recurrent
-states and 1.13 GiB for the speculative intermediate states, which equals 46,532 tokens of pool.
+Every running request needs its own recurrent states, which come out of the memory that would
+otherwise hold the KV pool. With ReplaySSM there are no per-position intermediate states, so a slot
+costs five fp32 recurrent states, 0.76 GiB, which equals about 19,000 tokens of pool.
 The pool is shared between the slots. A single request can use all of it while the other slot is
 idle, and two long requests compete for it, in which case SGLang delays one or evicts the cached
 prefix of the other. Agent runs on this deployment reach 115k tokens of context at the median and
 145k at the 90th percentile, so two slots let one long run proceed beside shorter requests while a
-single request keeps 237k tokens of context.
+single request keeps its full 262k tokens of context.
 
 | Streams | Per stream | Total |
 | ---: | ---: | ---: |
-| 1 | 123.3 tok/s | 123.3 tok/s |
-| 2 | 115.2 tok/s | 183.3 tok/s |
+| 1 | 133.9 tok/s | 133.9 tok/s |
+| 2 | 127.2 tok/s | 202.8 tok/s |
 
 DFlash 2 has an open report of wrong answers, and of prompts appearing in other conversations,
 under concurrent load (sglang#36548). `scripts/qcon.py` runs 64 problems with checkable answers,
 three-step arithmetic and four-person ordering puzzles, greedy with thinking on. It runs them once
 alone and once at two streams, interleaved with unrelated essay and code requests. All 64 answers
 are right in both runs, and no answer contains a word from the interleaved requests. The answer
-text differs between the runs, with 29 of 64 byte-identical, because a verify batch of a different
+text differs between the runs, with 31 of 64 byte-identical, because a verify batch of a different
 size rounds differently.
 
 SGLang schedules a waiting prefill ahead of decode, so a long prompt that arrives while the other
@@ -192,8 +246,10 @@ The long prompt here has 124k tokens. On an idle server, interval 40 prefills at
 fit about a dozen decode steps between two 4,096-token chunks, so a long prompt that arrives beside
 a running answer takes about 20% longer to its first token.
 
-`--max-mamba-cache-size` counts recurrent states, five per request on this model, and must be at
-least five times `--max-running-requests` for the server to start.
+`--max-mamba-cache-size` counts recurrent states, five per request on this model (three, plus two for
+prefix-cache tracking), and must be at least five times `--max-running-requests` for the server to
+start. Exactly ten leaves none spare, and sglang#43204 stops the engine when every state is taken
+and locked, so the service runs twelve.
 
 ## Structured output
 
@@ -209,14 +265,14 @@ ask for it in the prompt and validate the answer.
 
 ## Tool calls
 
-The `qwen3_coder` parser of SGLang v0.5.20 converts every parameter to the type in the tool's
+The `qwen3_coder` parser of SGLang (v0.5.20 and v0.5.22 alike) converts every parameter to the type in the tool's
 schema, and so holds each parameter until its `</parameter>` tag. A call that writes a file sends
 its name and then nothing until the last line of the file is generated. Agent clients put an idle
 timeout on the stream, five minutes by default in pi, and drop a longer write, then retry it from
 the start with the same result.
 
 We serve the parser of [sglang PR #25246](https://github.com/sgl-project/sglang/pull/25246),
-ported to v0.5.20 (`docker/`). It streams string parameters as they are generated and converts
+ported to v0.5.20 (`docker/`); the parser file is the same in v0.5.22. It streams string parameters as they are generated and converts
 the others when they close, as before. `scripts/toolstream.py` asks for one `write` of the
 integers 1 to 3,000, 16,931 characters of arguments:
 
@@ -277,19 +333,20 @@ only, and the recurrent state has no gauge, so we account for memory from the st
 | CUDA context and driver reserve | -2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
 | Target weights | -19.12 | **26.13** | `Load weight end ... mem usage=19.12` |
 | Drafter weights, FP8 | -2.53 | **23.56** | `type=DFlash2DraftModel, avail mem=23.56, mem usage=2.53` |
-| Recurrent state, two slots | -4.99 | | `ssm 1.55 + intermediate_ssm 3.38 + conv 0.03 + 0.03` |
-| KV pool, target (16 full-attention layers) | -7.24 | **11.51** | `K size: 3.62 GB, V size: 3.62 GB` |
-| KV pool, drafter (5 layers) | -2.26 | **9.24** | `K size: 1.13 GB, V size: 1.13 GB` |
-| Autotune and prefill CUDA graph | -2.63 | 6.61 | `Capture target prefill CUDA graph end ... avail mem=6.61` |
-| Verify CUDA graphs | -0.12 | **6.49** | `available_gpu_mem=6.49` |
+| Recurrent state, twelve slots | -1.90 | | `ssm_state 1.83 + conv_state 0.04 + intermediate_conv_window 0.03` |
+| KV pool, target (16 full-attention layers) | -9.60 | **12.06** | `K size: 4.80 GB, V size: 4.80 GB` |
+| KV pool, drafter (5 layers) | -3.00 | **9.06** | `K size: 1.50 GB, V size: 1.50 GB` |
+| Autotune and prefill CUDA graph | -2.54 | 6.52 | `Capture target prefill CUDA graph end ... avail mem=6.52` |
+| Verify CUDA graphs | -0.12 | **6.40** | `available_gpu_mem=6.40` |
 
 The model has `head_dim` 256 and 4 KV heads, so a token of FP8 KV takes `2 × 4 × 256 = 2 KiB` per
 layer: 32 KiB over the 16 full-attention layers of the target and 10 KiB over the 5 layers of the
 drafter. Each token of context therefore costs 42 KiB, about 30% more than without speculation.
-The pools match this exactly: 237,271 tokens at 32 KiB is 7.24 GiB, and at 10 KiB 2.26 GiB.
+The pools match this exactly: 314,365 tokens at 32 KiB is 9.59 GiB, and at 10 KiB 3.00 GiB.
 
-The usable context is `max_req_input_len`, 237,265 here, which is smaller than the
-`context_length` of 262,144. Clients should be sized from it and re-read it after any change to
+The usable context is `max_req_input_len`, 262,138 here: the pool is larger than the
+`context_length` of 262,144, so the model's own limit applies. Clients should be sized from it and
+re-read it after any change to
 `--mem-fraction-static`, `--max-running-requests`, `--max-mamba-cache-size`, the checkpoint, the
 drafter or the SGLang version.
 
@@ -368,6 +425,12 @@ python3 scripts/quality.py $U                # needle at 30k/120k, 12 math probl
 python3 scripts/qcon.py    $U out.json 2     # 64 checked answers alone and at 2 streams
 python3 scripts/stall.py   $U 1 40000        # one stream decoding while a ~124k prompt arrives
 python3 scripts/apitest.py $U image.png      # structured output, tool calls, cache report, 1 MP image
+python3 scripts/accept.py  $U 2              # tokens per verification and decode, sampled, thinking on
+python3 scripts/longdecode.py $U             # decode at ~34k and ~115k tokens of context
+python3 scripts/prefix.py  $U                # facts recalled across a conversation served from cache
+python3 scripts/degen.py   $U                # 24 long sampled answers checked for loops
+python3 scripts/drift.py run $U a.json       # greedy answers, to compare two builds (drift.py cmp)
+python3 scripts/admission.py $U              # a short request beside a long prefill
 python3 scripts/toolstream.py $U 3000        # do a long tool call's arguments stream while generated
 python3 scripts/refusal.py $U [$U2]          # six borderline prompts, refusals per server
 python3 scripts/fid.py dump $U corpus.json out.json.gz   # then: fid.py cmp ref.json.gz out.json.gz

@@ -1,12 +1,15 @@
-# Stock SGLang v0.5.20 with one file replaced: the qwen3_coder tool-call parser, which in v0.5.20
-# holds every parameter until its </parameter> tag. qwen3_coder_detector.py is sglang PR #25246
-# ported to v0.5.20 (see the README, "Tool calls"): string parameters stream as they are
-# generated, everything else is converted as before.
+# Stock SGLang v0.5.22 with four changes, each a script that fails the build if v0.5.22's text
+# moved (see the README):
+#   qwen3_coder_detector.py  streaming tool-call arguments (sglang PR #25246, ported)
+#   replayssm_dflash.py      DFlash commits through ReplaySSM on Gated DeltaNet (PR #35725, ported)
+#   draft_prob_round.py      sampled verify accepts draft probabilities that round above 1 (PR #45819)
+#   sched_admission.py       admission counts a prefilling request's row once (PR #44401)
 #
-# The build stops unless the stock parser fails test_stream.py (else the test proves nothing),
-# the patched parser passes it, and the patched parser passes SGLang's own Qwen3 Coder tests.
-FROM lmsysorg/sglang:v0.5.20
-COPY qwen3_coder_detector.py test_stream.py /tmp/patch/
+# The parser step stops unless the stock parser fails test_stream.py (else the test proves
+# nothing), the patched parser passes it, and the patched parser passes SGLang's own Qwen3 Coder
+# tests. The last step prints the patched files' hashes, to match a build against a tested image.
+FROM lmsysorg/sglang:v0.5.22
+COPY qwen3_coder_detector.py test_stream.py replayssm_dflash.py draft_prob_round.py sched_admission.py /tmp/patch/
 RUN set -e; \
     T="$(python3 -c 'import sglang.srt.function_call.qwen3_coder_detector as m; print(m.__file__)')"; \
     S="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).parents[2])')"; \
@@ -17,5 +20,11 @@ RUN set -e; \
     python3 /tmp/patch/test_stream.py; \
     cd "$S/test/registered/unit/function_call"; \
     python3 -m unittest -v test_function_call_parser.TestQwen3CoderDetector; \
+    python3 /tmp/patch/replayssm_dflash.py; \
+    python3 /tmp/patch/draft_prob_round.py; \
+    python3 /tmp/patch/sched_admission.py; \
     rm -rf /tmp/patch; \
-    echo "patched $T"
+    P="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).parent)')"; \
+    cd "$P" && sha256sum srt/function_call/qwen3_coder_detector.py \
+        srt/layers/attention/hybrid_linear_attn_backend.py srt/mem_cache/kv_cache_configurator.py \
+        kernels/ops/speculative/reject_sampling.py srt/managers/scheduler.py

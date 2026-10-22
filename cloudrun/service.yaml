@@ -38,10 +38,10 @@ spec:
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
-        # lmsysorg/sglang:v0.5.20 with the streaming qwen3_coder tool-call parser, built by
-        # docker/build.sh. DFlash 2 is upstream since v0.5.19; the old overlay image had
-        # sglang#37817 (stale GDN state on prefix-cache hits).
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20-stream
+        # lmsysorg/sglang:v0.5.22 with four patches, built by docker/build.sh (see the Dockerfile).
+        # DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817 (stale GDN
+        # state on prefix-cache hits).
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched
           ports:
             - name: http1
               containerPort: 8080
@@ -68,16 +68,23 @@ spec:
           # attempt to outrun an unbounded one. It costs 45,824 tokens of KV pool
           # (max_req_input_len 185,984 -> 140,160) and no decode: 110.9 tok/s against 111.0.
           #
-          # --max-mamba-cache-size 5 is the floor, and on purpose. The hybrid state cache is
-          # sized in units of mamba_ratio, which is 5 for this model, so slots must be >= 5 per
-          # request: 4 refuses to start with "resulting max_num_reqs=0". SGLang auto-picks 8, but
-          # floor(8/5) and floor(5/5) are both 1 request, so the extra three slots buy no
-          # concurrency - only radix buffer. Dropping them is worth +10,738 tokens of context
-          # (140,160 -> 150,898) and costs nothing measurable: prefix reuse stays at 13,504 of
-          # 13,552 tokens and decode is 113.2 tok/s against 110.9.
+          # --max-mamba-cache-size counts recurrent-state slots, five per running request on this
+          # model (three base, two for prefix-cache tracking), so 10 is exactly two requests with
+          # none spare; sglang#43204 kills the engine when every slot is taken and locked. 12 keeps
+          # two spare for 0.31 GB of fp32 state (pool 321,526 -> 314,365 tokens).
           #
-          # Only ssm_state scales with slots (1.27 -> 0.84 GB); intermediate_ssm_state_cache is a
-          # fixed 2.25 GB, which is why 8 -> 5 returns 0.43 GB and not 1.34.
+          # --enable-linear-replayssm-spec, with docker/replayssm_dflash.py: verification keeps
+          # compact replay records instead of the recurrent state at each of the 8 drafted
+          # positions, and replays the accepted prefix into the checkpoint afterwards. It drops the
+          # 3.38 GB intermediate_ssm_state_cache (pool 237,384 -> 321,526 tokens at 10 slots) and
+          # the state writes of every verify step: decode +7.5% greedy, +6.8% sampled, +6% at 34k
+          # and +14% at 115k tokens of context. Not bit-exact with the per-position states: greedy
+          # text differs about as much as between SGLang v0.5.20 and v0.5.22 (10 vs 9 of 24
+          # answers identical), and every quality check is unchanged.
+          #
+          # --speculative-use-block-verification (arXiv 2403.10444): after an early rejection it can
+          # still accept a longer prefix, with a correction that keeps the target distribution. It
+          # acts on sampled requests only: 3.39 -> 3.56 tokens per verify step, decode +4.2%.
           #
           # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot.
           #
@@ -117,7 +124,7 @@ spec:
               --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=10
+              --max-mamba-cache-size=12
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
@@ -126,6 +133,8 @@ spec:
               --grammar-backend=none
               --prefill-decode-interval=40
               --enable-cache-report
+              --speculative-use-block-verification
+              --enable-linear-replayssm-spec
               --api-key "$SGLANG_API_KEY"
           env:
             - name: SGLANG_API_KEY
