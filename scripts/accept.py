@@ -17,6 +17,7 @@ import urllib.request
 
 sys.argv += [] if len(sys.argv) > 2 else ["1"]
 URL, ROUNDS = sys.argv[1], int(sys.argv[2])
+GREEDY = len(sys.argv) > 3 and sys.argv[3] == "greedy"  # accept.py URL ROUNDS greedy
 KEY = os.environ["SGLANG_API_KEY"]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench2  # noqa: E402  (its prompts and stream(); its benchmark runs only as a script)
@@ -36,7 +37,7 @@ if __name__ == "__main__":  # longdecode.py imports counters()
     for _ in range(ROUNDS):
         for ps in bench2.W.values():
             for p in ps:
-                rate, n = bench2.stream(p, thinking=True, sampled=True, max_tokens=1200)
+                rate, n = bench2.stream(p, thinking=True, sampled=not GREEDY, max_tokens=1200)
                 rates.append(rate)
                 toks += n
     g1, v1 = counters()

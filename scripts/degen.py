@@ -51,6 +51,8 @@ PROMPTS = [
 def ask(prompt):
     body = {"model": MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4000,
             "chat_template_kwargs": {"enable_thinking": True}, "separate_reasoning": False}
+    if os.environ.get("DEGEN_GREEDY") == "1":  # the same prompts at temperature 0
+        body["temperature"] = 0
     r = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(),
                                {"Content-Type": "application/json", "Authorization": "Bearer " + KEY})
     d = json.loads(urllib.request.urlopen(r, timeout=3600).read())
