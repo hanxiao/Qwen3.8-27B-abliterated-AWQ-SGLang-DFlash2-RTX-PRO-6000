@@ -16,6 +16,9 @@ metadata:
   name: qwen38-27b-nvfp4-dflash2
   labels:
     cloud.googleapis.com/location: us-central1
+  annotations:
+    # The 64 GiB memory limit below is refused unless the service declares the ALPHA launch stage.
+    run.googleapis.com/launch-stage: ALPHA
 spec:
   template:
     metadata:
@@ -30,6 +33,8 @@ spec:
         # Mandatory in this preview; without it the deploy hangs or fails on quota.
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
+      # Two requests per slot, as before (4 slots): requests 5 to 8 queue inside SGLang, where the
+      # prefix cache and the admission order live, and Cloud Run returns 429 only beyond 8.
       containerConcurrency: 8
       # Cloud Run's maximum. A request is one model turn, and an agent turn that writes a long
       # file in one tool call runs for many minutes; at 600 Cloud Run cut such turns off.
@@ -40,7 +45,8 @@ spec:
       containers:
         # lmsysorg/sglang:v0.5.22 with five patches and Granian, built by docker/build.sh (see the
         # Dockerfile). DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817
-        # (stale GDN state on prefix-cache hits).
+        # (stale GDN state on prefix-cache hits). The deployed revision pins this tag by digest,
+        # sha256:28876b9aa7a67ba02dcee0bedc3b41954668c1978f64832f5c289424438f8956.
         - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched2
           # h2c: Cloud Run speaks HTTP/2 to the container (served by Granian, --enable-http2), so a
           # client that hangs up reaches SGLang as a stream reset and its request is aborted within
@@ -72,10 +78,21 @@ spec:
           # attempt to outrun an unbounded one. It costs 45,824 tokens of KV pool
           # (max_req_input_len 185,984 -> 140,160) and no decode: 110.9 tok/s against 111.0.
           #
+          # 0.79 rather than 0.80 since the move to four slots: at 0.80 the four-slot config left
+          # 5.00 GB after startup, and one /generate with full-prompt top-20 input logprobs
+          # (scripts/fid.py) asked for 1.89 GiB, hit CUDA OOM and killed the server. At 0.79 this
+          # revision has 5.49 GB left after startup (available_gpu_mem), more than the two-slot
+          # revision's 5.21, and the pool is 266,083 tokens (max_req_input_len 262,138).
+          #
           # --max-mamba-cache-size counts recurrent-state slots, five per running request on this
-          # model (three base, two for prefix-cache tracking), so 10 is exactly two requests with
-          # none spare; sglang#43204 kills the engine when every slot is taken and locked. 12 keeps
-          # two spare for 0.31 GB of fp32 state (pool 321,526 -> 314,365 tokens).
+          # model (three base, two for prefix-cache tracking); sglang#43204 kills the engine when
+          # every slot is taken and locked. 22 = 5 x 4 requests + 2 spare: 3.34 GB of fp32 state.
+          # The state stays fp32 (ReplaySSM sets it): greedy output is byte-identical to
+          # the two-slot config on 104/104 prompts. bfloat16 state would fit eight slots but
+          # changes greedy text (41/104 identical); see the README.
+          #
+          # --cuda-graph-max-bs-decode=4 captures decode and verify graphs for batch sizes 1-4,
+          # one per slot count.
           #
           # --enable-linear-replayssm-spec, with docker/replayssm_dflash.py: verification keeps
           # compact replay records instead of the recurrent state at each of the 8 drafted
@@ -90,13 +107,8 @@ spec:
           # still accept a longer prefix, with a correction that keeps the target distribution. It
           # acts on sampled requests only: 3.39 -> 3.56 tokens per verify step, decode +4.2%.
           #
-          # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot:
-          # 42 = 5 x 8 slots + 2 spare, in bfloat16 (--mamba-ssm-dtype bfloat16, 3.3 GiB) so that
-          # eight slots and the full 262k context fit together. fp32 state at 0.80 fitted two slots.
-          #
-          # --mem-fraction-static 0.85 buys a 335,498-token pool (max_req_input_len 262,138) at
-          # eight slots; the vision allocation stays bounded by the 1,024-token image cap below,
-          # and 2.46 GiB of the card is unclaimed after startup.
+          # RAISING --max-running-requests REQUIRES RAISING --max-mamba-cache-size IN STEP or the
+          # server won't boot.
           #
           # The target and the drafter come from the bucket (cloudrun/gcsdl.py, parallel ranged
           # downloads to local disk) before SGLang starts. Loading the target straight off the
@@ -120,21 +132,22 @@ spec:
               --trust-remote-code
               --host=0.0.0.0
               --port=8080
-              --mem-fraction-static=0.85
+              --mem-fraction-static=0.79
               --context-length=262144
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer
               --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=4096
               --max-prefill-tokens=4096
-              --max-running-requests=8
+              --max-running-requests=4
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=42
+              --max-mamba-cache-size=22
+              --cuda-graph-max-bs-decode=4
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
@@ -145,8 +158,6 @@ spec:
               --enable-cache-report
               --speculative-use-block-verification
               --enable-linear-replayssm-spec
-              --mamba-ssm-dtype=bfloat16
-              --cuda-graph-max-bs-decode=8
               --enable-http2
               --api-key "$SGLANG_API_KEY"
           env:
@@ -155,17 +166,26 @@ spec:
             # the BF16 head. Decode +6%; 1.27 GB, taken from the memory left after the pools.
             - name: SGLANG_DFLASH_DRAFT_HEAD
               value: int8
-            # The int8 draft head's Triton kernel tiles M=rows with BM=64 once a verify batch
-            # passes 32 draft rows, and its default (BN=128, BK=256, stages=3) then needs 128 KiB
-            # of shared memory against this MIG partition's 99 KiB limit: the graph capture dies
-            # with triton OutOfResources. BK=128, stages=2 fits (98,304 B) and costs ~0.4 ms of
-            # the ~60 ms step. Rows above 32 need it; 2 slots never reach it.
+            # Tile of the int8 draft-head kernel (BN, BK, warps, stages). Above 32 draft rows per
+            # verify batch (slots x block) the kernel tiles BM=64, and the default 128,256,8,3 then
+            # needs 131,072 B of shared memory against this MIG partition's 101,376: Triton
+            # OutOfResources at startup. 128,128,8,2 fits in 98,304 B. This revision has at most
+            # 4 x 8 = 32 rows; it carries the setting from the configuration it was measured with.
             - name: SGLANG_DFLASH_DRAFT_HEAD_CFG
               value: '128,128,8,2'
             - name: SGLANG_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: SGLANG_API_KEY
+                  key: latest
+            # Carried over from earlier revisions. The model and the drafter load from local disk
+            # (gcsdl.py), so serving does not download from Hugging Face.
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: '1'
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: HF_TOKEN
                   key: latest
           volumeMounts:
             - name: weights
