@@ -7,12 +7,12 @@
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
 | Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with five patches in `docker/`, FlashInfer attention and GDN prefill kernels |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
-| Slots | 2 concurrent requests |
-| Context | **262,144** tokens per request; one 314,253-token FP8 KV pool shared by both slots |
+| Slots | 8 concurrent requests |
+| Context | **262,144** tokens per request; one 335,498-token FP8 KV pool shared by all eight slots |
 | Decode, greedy, thinking off | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
-| Decode, greedy, thinking off, two streams | 133.5 tok/s each, 208.5 tok/s in total |
+| Decode, greedy, thinking off, eight streams | 105.0 tok/s each, **840 tok/s in total** (602.5 tok/s over the round's wall time, prefill included) |
 | Decode, sampled, thinking on | 126.5 tok/s, 3.60 tokens per verification |
-| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
+| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k (one stream; with two long requests the pool holds them) |
 | Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
 | Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at two concurrent streams |
@@ -227,19 +227,52 @@ from scratch produce identical greedy text. The kernel needs CUDA 13 and prefill
 ## Concurrency
 
 Every running request holds its own recurrent states, which share memory with the KV pool. With
-ReplaySSM a slot needs only five fp32 recurrent states, 0.76 GiB or about 19,000 tokens of pool.
-`--max-mamba-cache-size` counts these states, three per request plus two for prefix-cache tracking,
-and must be at least five times `--max-running-requests`. We set twelve to keep two in reserve,
-since the engine stops when every state is taken and locked (sglang#43204). The pool itself is shared: one request can use all of it while the other slot is idle, and when two
-long requests compete, SGLang delays one or evicts the cached prefix of the other. Agent runs on
-this deployment reach 115k tokens of context at the median and 145k at the 90th percentile, so two
-slots let a long run proceed beside shorter requests while a single request keeps the full 262k
-context. Two streams each decode at about 95% of the single-stream rate:
+ReplaySSM a slot needs only five recurrent states, 0.76 GiB in fp32 or 0.38 GiB in bfloat16 (about
+19,000 and 9,500 tokens of pool). `--max-mamba-cache-size` counts these states, three per request
+plus two for prefix-cache tracking, and must be at least five times `--max-running-requests`. We set
+forty-two for eight requests and keep two in reserve, since the engine stops when every state is
+taken and locked (sglang#43204). `--mamba-ssm-dtype bfloat16` halves that pool, and it is what pays
+for eight slots *and* the full 262k context: 42 slots at bf16 are 3.3 GiB, where fp32 would be 6.7
+GiB and would leave the pool at 188k tokens. The pool itself is shared: one request can use all of
+it while the other slots are idle, and when long requests compete, SGLang delays one or evicts the
+cached prefix of another. Agent runs on this deployment reach 115k tokens of context at the median
+and 145k at the 90th percentile, so the pool still holds two long runs beside shorter requests while
+a single request keeps the full 262k context.
 
-| Streams | Per stream | Total |
-| ---: | ---: | ---: |
-| 1 | 141.0 tok/s | 141.0 tok/s |
-| 2 | 133.5 tok/s | 208.5 tok/s |
+**Decode is bandwidth-bound per step and concurrency-bound per deployment.** A step reads the target
+and the drafter once for all the tokens it verifies, so one stream is capped by `accept_length` over
+the ~29 ms a step takes, and DFlash2's acceptance saturates near 4.1–4.5 however long the block is.
+A second request adds its own tokens to the same weight read for a few ms of compute, which is why
+throughput scales with slots while single-stream latency does not move:
+
+| Streams | Per stream | Total | Total over the round's wall time |
+| ---: | ---: | ---: | ---: |
+| 1 | 119.3 tok/s | 119.3 tok/s | 99.6 tok/s |
+| 2 | 119.8 tok/s | 239.6 tok/s | 190.4 tok/s |
+| 4 | 106.1 tok/s | 424.4 tok/s | 291.0 tok/s |
+| 8 | 105.0 tok/s | **840.0 tok/s** | **602.5 tok/s** |
+| 16 | 100.3 tok/s | (eight slots, queueing) | 446.8 tok/s |
+
+`scripts/bench3.py`, fourteen prompts, greedy with thinking off. Per-stream figures are decode only
+(the README's older "208.5 in total" for two streams); the last column is every completion token over
+the round's wall time, so it pays for prefill and queueing.
+
+### The 32-row ceiling
+
+Every configuration with `slots × num_draft_tokens > 32` used to die at startup with
+`triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 131072, Hardware
+limit: 101376`. The traceback names `sglang/srt/speculative/dflash_qhead.py` — this repo's int8 copy
+of `lm_head` for the draft candidates. Its tile is `BM = 16/32/64` by rows, so the 33rd draft row
+doubles `BM`, and with the default `BN=128, BK=256, stages=3` Triton then asks for 128 KiB of shared
+memory against this MIG partition's 99 KiB per block. `SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2`
+(BK 256→128, stages 3→2) fits in 98,304 B and costs about 0.4 ms of a ~60 ms step. That is the whole
+reason the card served two slots for so long: 4 × 8, 8 × 4, 8 × 8 and 16 × 4 all hit it.
+
+Verify cost is a staircase, measured here and independently in
+[StairCut](https://doi.org/10.5281/zenodo.23045275): 8 and 16 draft rows both cost 29 ms per step,
+32 rows 57–60 ms, 64 rows 60 ms, 128 rows 148 ms. Block 8 with eight slots (64 rows) sits on the
+flat part of it. Block 16 doubles the rows for 8% more acceptance, so it is the right choice for a
+single stream (153.7 tok/s with `--enable-torch-compile`) and the wrong one for throughput.
 
 DFlash 2 has an open report of wrong answers, and of prompts appearing in other conversations, under
 concurrent load (sglang#36548). `scripts/qcon.py` runs 64 problems with checkable answers,
@@ -273,17 +306,20 @@ target, and the recurrent state has no gauge, so we account for memory from the 
 | CUDA context and driver reserve | -2.40 | **45.24** | `Load weight begin. avail mem=45.24` |
 | Target weights | -19.12 | **26.13** | `Load weight end ... mem usage=19.12` |
 | Drafter weights, FP8 | -2.53 | **23.56** | `type=DFlash2DraftModel, avail mem=23.56, mem usage=2.53` |
-| Recurrent state, twelve slots | -1.90 | | `ssm_state 1.83 + conv_state 0.04 + intermediate_conv_window 0.03` |
-| KV pool, target (16 full-attention layers) | -9.60 | **12.06** | `K size: 4.80 GB, V size: 4.80 GB` |
-| KV pool, drafter (5 layers) | -3.00 | **9.06** | `K size: 1.50 GB, V size: 1.50 GB` |
-| Autotune and prefill CUDA graph | -2.54 | 6.52 | `Capture target prefill CUDA graph end ... avail mem=6.52` |
-| Draft head, int8 | -1.21 | 5.31 | `DFLASH quantized draft head: int8, 248320 x 5120, 1.27 GB` |
-| Verify CUDA graphs | -0.10 | **5.21** | `available_gpu_mem=5.21` |
+| Recurrent state, forty-two slots, bf16 | -3.30 | | `ssm_state` at half of the fp32 1.83 GiB per twelve slots |
+| KV pool, target (16 full-attention layers) | -10.24 | | `K size: 5.12 GB, V size: 5.12 GB`, 335,498 tokens |
+| KV pool, drafter (5 layers) | -3.20 | | `K size: 1.60 GB, V size: 1.60 GB`, 335,498 tokens |
+| Autotune and prefill CUDA graph | -2.27 | | `Capture target prefill CUDA graph end` |
+| Draft head, int8 | -1.21 | | `DFLASH quantized draft head: int8, 248320 x 5120, 1.27 GB` |
+| Verify CUDA graphs, 12 shapes | -0.25 | **2.46** | `startup_available 2.46` (`/get_server_info`) |
 
 The model has `head_dim` 256 and 4 KV heads, so a token of FP8 KV takes `2 × 4 × 256 = 2 KiB` per
 layer: 32 KiB over the 16 full-attention layers of the target and 10 KiB over the 5 layers of the
 drafter. A token of context therefore costs 42 KiB, about 30% more than without speculation, and
-the pools match this exactly: 314,253 tokens at 32 KiB is 9.59 GiB, and at 10 KiB 3.00 GiB.
+the pools match this exactly: 335,498 tokens at 32 KiB is 10.24 GiB, and at 10 KiB 3.20 GiB.
+`--mem-fraction-static 0.85` is what buys that pool at eight slots; 0.80 with fp32 state fits only
+two, and the vision headroom that 0.80 was chosen for is preserved by capping the image at 1,024
+tokens.
 
 The usable context is `max_req_input_len`, 262,138 here, since the pool is larger than the
 262,144-token context of the model. Clients take their context window from it and read it again
@@ -294,7 +330,8 @@ the checkpoint, the drafter or the SGLang version.
 
 The fast Qwen2-VL image processor runs in the API process and allocates GPU memory outside the
 static budget of the engine, in proportion to the image. We leave room for it with
-`--mem-fraction-static 0.80` and cap the image size, so that the allocation stays bounded. The
+`--mem-fraction-static 0.85` and cap the image size, so that the allocation stays bounded: 2.46 GiB
+of the card is unclaimed after startup, and the cap bounds the allocation to ~1,024 tokens. The
 processor resizes larger images to the cap and keeps their aspect ratio. With patch size 16 and
 merge size 2, a token covers 32x32 pixels, so a cap of 1,048,576 pixels is exactly 1,024 image
 tokens. Preprocessing on the GPU takes 0.52 s for a 3000x2000 image, against 0.94 s on the CPU.
@@ -357,6 +394,11 @@ answer.
 ## Flags
 
 `--attention-backend flashinfer` is required on SM120, which has no `trtllm_mha`.
+`--mamba-ssm-dtype bfloat16` halves the GDN state pool, and it also selects the FlashInfer GDN
+decode kernel on SM100+ if `--linear-attn-decode-backend flashinfer` is set (measured: no decode
+difference at eight slots, so we leave the kernel on Triton and take only the memory).
+`SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2` retiles the int8 draft head so that verify batches above
+32 draft rows fit in this partition's 99 KiB of shared memory (see Concurrency).
 `--kv-cache-dtype fp8_e4m3` is the lowest KV precision SGLang supports for a hybrid GDN model.
 `--tool-call-parser qwen3_coder` parses the `<tool_call><function=…>` format of this chat template,
 which the `hermes` parser drops. `--speculative-draft-attention-backend flashinfer` gives the
@@ -371,7 +413,10 @@ DSpark recipe do not apply to it.
 `cloudrun/service.yaml` is the deployed configuration. Cloud Run requires the container to listen on
 8080 and `gpu-zonal-redundancy-disabled: 'true'` for the deployment to complete. With `minScale:
 '1'` and `maxScale: '1'`, one instance stays warm, and a cold start occurs only when a revision is
-replaced. `timeoutSeconds: 3600`, the maximum, lets an agent turn that writes a long file in one
+replaced. `containerConcurrency` is 8 to match the eight slots: Cloud Run must admit a request per
+slot or the queue lives at the front end instead of in SGLang's scheduler, where the prefix cache
+and the admission order live. The cold start is ~13 minutes at eight slots: 480 s of weights, then
+load, 12 CUDA-graph shapes for the draft verify and 12 for the target verify. `timeoutSeconds: 3600`, the maximum, lets an agent turn that writes a long file in one
 tool call run for up to an hour.
 
 The weights come from a bucket in the same region (`BUCKET` in both yaml files).

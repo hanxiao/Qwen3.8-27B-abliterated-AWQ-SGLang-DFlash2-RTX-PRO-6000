@@ -30,7 +30,7 @@ spec:
         # Mandatory in this preview; without it the deploy hangs or fails on quota.
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
-      containerConcurrency: 4
+      containerConcurrency: 8
       # Cloud Run's maximum. A request is one model turn, and an agent turn that writes a long
       # file in one tool call runs for many minutes; at 600 Cloud Run cut such turns off.
       timeoutSeconds: 3600
@@ -90,7 +90,13 @@ spec:
           # still accept a longer prefix, with a correction that keeps the target distribution. It
           # acts on sampled requests only: 3.39 -> 3.56 tokens per verify step, decode +4.2%.
           #
-          # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot.
+          # RAISING --max-running-requests REQUIRES RAISING THIS IN STEP or the server won't boot:
+          # 42 = 5 x 8 slots + 2 spare, in bfloat16 (--mamba-ssm-dtype bfloat16, 3.3 GiB) so that
+          # eight slots and the full 262k context fit together. fp32 state at 0.80 fitted two slots.
+          #
+          # --mem-fraction-static 0.85 buys a 335,498-token pool (max_req_input_len 262,138) at
+          # eight slots; the vision allocation stays bounded by the 1,024-token image cap below,
+          # and 2.46 GiB of the card is unclaimed after startup.
           #
           # The target and the drafter come from the bucket (cloudrun/gcsdl.py, parallel ranged
           # downloads to local disk) before SGLang starts. Loading the target straight off the
@@ -114,21 +120,21 @@ spec:
               --trust-remote-code
               --host=0.0.0.0
               --port=8080
-              --mem-fraction-static=0.80
+              --mem-fraction-static=0.85
               --context-length=262144
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer
               --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=4096
               --max-prefill-tokens=4096
-              --max-running-requests=2
+              --max-running-requests=8
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=12
+              --max-mamba-cache-size=42
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
@@ -139,6 +145,8 @@ spec:
               --enable-cache-report
               --speculative-use-block-verification
               --enable-linear-replayssm-spec
+              --mamba-ssm-dtype=bfloat16
+              --cuda-graph-max-bs-decode=8
               --enable-http2
               --api-key "$SGLANG_API_KEY"
           env:
@@ -147,6 +155,13 @@ spec:
             # the BF16 head. Decode +6%; 1.27 GB, taken from the memory left after the pools.
             - name: SGLANG_DFLASH_DRAFT_HEAD
               value: int8
+            # The int8 draft head's Triton kernel tiles M=rows with BM=64 once a verify batch
+            # passes 32 draft rows, and its default (BN=128, BK=256, stages=3) then needs 128 KiB
+            # of shared memory against this MIG partition's 99 KiB limit: the graph capture dies
+            # with triton OutOfResources. BK=128, stages=2 fits (98,304 B) and costs ~0.4 ms of
+            # the ~60 ms step. Rows above 32 need it; 2 slots never reach it.
+            - name: SGLANG_DFLASH_DRAFT_HEAD_CFG
+              value: '128,128,8,2'
             - name: SGLANG_API_KEY
               valueFrom:
                 secretKeyRef:
