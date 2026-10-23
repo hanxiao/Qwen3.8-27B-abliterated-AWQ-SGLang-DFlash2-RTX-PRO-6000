@@ -8,7 +8,7 @@
 | Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with five patches in `docker/`, FlashInfer attention and GDN prefill kernels |
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
 | Slots | 2 concurrent requests |
-| Context | **262,144** tokens per request; one 314,365-token FP8 KV pool shared by both slots |
+| Context | **262,144** tokens per request; one 314,253-token FP8 KV pool shared by both slots |
 | Decode, one stream | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
 | Decode, two streams | 133.5 tok/s each, 208.5 tok/s in total |
 | Decode, thinking on, sampled | 126.5 tok/s, 3.60 tokens per verification |
@@ -283,7 +283,7 @@ target, and the recurrent state has no gauge, so we account for memory from the 
 The model has `head_dim` 256 and 4 KV heads, so a token of FP8 KV takes `2 × 4 × 256 = 2 KiB` per
 layer: 32 KiB over the 16 full-attention layers of the target and 10 KiB over the 5 layers of the
 drafter. A token of context therefore costs 42 KiB, about 30% more than without speculation, and
-the pools match this exactly: 314,365 tokens at 32 KiB is 9.59 GiB, and at 10 KiB 3.00 GiB.
+the pools match this exactly: 314,253 tokens at 32 KiB is 9.59 GiB, and at 10 KiB 3.00 GiB.
 
 The usable context is `max_req_input_len`, 262,138 here, since the pool is larger than the
 262,144-token context of the model. Clients take their context window from it and read it again
