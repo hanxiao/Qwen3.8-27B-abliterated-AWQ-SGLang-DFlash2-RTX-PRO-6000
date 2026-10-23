@@ -11,7 +11,7 @@ set -euo pipefail
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 REPO="${REPO:-sglang}"
-TAG="${TAG:-qwen38-sglang:v0.5.22-patched2}"
+TAG="${TAG:-qwen38-sglang:v0.5.22-patched5}"
 
 here="$(cd "$(dirname "$0")" && pwd)"
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT

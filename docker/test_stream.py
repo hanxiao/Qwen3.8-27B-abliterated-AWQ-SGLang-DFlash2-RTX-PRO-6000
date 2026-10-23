@@ -71,6 +71,15 @@ CASES = {
     "type lists, anyOf, untyped, unknown": "<tool_call>\n<function=edit>\n<parameter=note>\na \"b\"\n</parameter>\n<parameter=tag>\nt1\n</parameter>\n<parameter=free>\n{\"x\": 1}\n</parameter>\n<parameter=count>\n7\n</parameter>\n<parameter=extra>\nnot in schema\n</parameter>\n</function>\n</tool_call>",
     "blank lines around the value": "<tool_call>\n<function=write>\n<parameter=path>\nd.txt\n</parameter>\n<parameter=content>\n\n\nbody\n\n\n</parameter>\n</function>\n</tool_call>",
     "tool not in the list": "<tool_call>\n<function=unknown_tool>\n<parameter=q>\nhello\n</parameter>\n</function>\n</tool_call>",
+    # sglang#43150: the model closes </tool_call> but omits </function> (and sometimes </parameter>)
+    "no </function>, typed last": "<tool_call>\n<function=write>\n<parameter=path>\ne.txt\n</parameter>\n<parameter=mode>\n20\n</parameter>\n</tool_call>",
+    "no </function>, string last": "<tool_call>\n<function=write>\n<parameter=path>\nf.txt\n</parameter>\n<parameter=content>\nhello\n</parameter>\n</tool_call>",
+    "no </function> or </parameter>, typed": "<tool_call>\n<function=write>\n<parameter=path>\ng.txt\n</parameter>\n<parameter=mode>\n20\n</tool_call>",
+    "no </function> or </parameter>, string": "<tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</tool_call>",
+    # seen live on Qwen3.8-27B: neither </function> nor </tool_call>, the next call starts right away
+    "no </function> or </tool_call>, then <tool_call>": "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n<tool_call>\n<function=write>\n<parameter=path>\ni.txt\n</parameter>\n<parameter=mode>\n20\n</parameter>\n</function>\n</tool_call>",
+    "no </function> or </tool_call>, then <function=": "<tool_call>\n<function=write>\n<parameter=path>\nj.txt\n</parameter>\n<parameter=mode>\n20\n</parameter>\n<function=bash>\n<parameter=command>\npwd\n</parameter>\n</function>\n</tool_call>",
+    "no </function> then a second call": "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</tool_call>\n<tool_call>\n<function=write>\n<parameter=path>\nh.txt\n</parameter>\n<parameter=content>\nsecond\n</parameter>\n</function>\n</tool_call>",
 }
 
 print("the content streams before its closing tag")
@@ -95,6 +104,18 @@ for name, text in CASES.items():
         except Exception as e:  # noqa: BLE001
             out = f"invalid JSON: {e}"
         check(f"{name}, chunk {chunk}", out == ref, f"\n    streamed={str(out)[:300]}\n    whole={str(ref)[:300]}")
+
+print("no whitespace-only text rides with call items (on /v1/messages it would close the tool_use block)")
+for name in ("two calls in a row", "no </function> then a second call"):
+    text = CASES[name]
+    for chunk in (1, 3, 17, 4096):
+        d = Detector()
+        mixed = []
+        for i in range(0, len(text), chunk):
+            r = d.parse_streaming_increment(text[i:i + chunk], TOOLS)
+            if r.calls and r.normal_text and not r.normal_text.strip():
+                mixed.append(r.normal_text)
+        check(f"{name}, chunk {chunk}", not mixed, mixed)
 
 print(f"\n  {FAILED} failure(s)")
 sys.exit(1 if FAILED else 0)

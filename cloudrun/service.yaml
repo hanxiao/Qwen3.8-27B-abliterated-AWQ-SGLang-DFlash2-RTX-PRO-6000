@@ -47,7 +47,7 @@ spec:
         # Dockerfile). DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817
         # (stale GDN state on prefix-cache hits). The deployed revision pins this tag by digest,
         # sha256:28876b9aa7a67ba02dcee0bedc3b41954668c1978f64832f5c289424438f8956.
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched2
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched5
           # h2c: Cloud Run speaks HTTP/2 to the container (served by Granian, --enable-http2), so a
           # client that hangs up reaches SGLang as a stream reset and its request is aborted within
           # a second. Over HTTP/1.1 the front end kept the backend request alive, and a stopped run

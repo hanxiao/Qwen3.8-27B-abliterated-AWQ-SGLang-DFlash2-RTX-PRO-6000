@@ -1,6 +1,9 @@
 # Stock SGLang v0.5.22 with five changes, each a script that fails the build if v0.5.22's text
 # moved (see the README), and Granian for --enable-http2:
-#   qwen3_coder_detector.py  streaming tool-call arguments (sglang PR #25246, ported)
+#   qwen3_coder_detector.py  streaming tool-call arguments (sglang PR #25246, ported), and closes
+#                            the arguments at </tool_call> when the model omits </function>
+#                            (issue #43150, fix of PR #43467 plus the held-terminator case), or
+#                            at the next <tool_call>/<function= when it omits both closing tags
 #   replayssm_dflash.py      DFlash commits through ReplaySSM on Gated DeltaNet (PR #35725, ported)
 #   draft_prob_round.py      sampled verify accepts draft probabilities that round above 1 (PR #45819)
 #   sched_admission.py       admission counts a prefilling request's row once (PR #44401)

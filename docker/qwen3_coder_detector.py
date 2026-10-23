@@ -219,6 +219,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             (self.parameter_end_token, len(self.parameter_end_token)),
             (self.parameter_prefix, 0),
             (self.function_end_token, 0),
+            (self.tool_call_end_token, 0),
         ]:
             idx = text.find(token)
             if idx != -1:
@@ -234,6 +235,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self.parameter_end_token,
             self.parameter_prefix,
             self.function_end_token,
+            self.tool_call_end_token,
         ]:
             max_len = min(len(token) - 1, len(text))
             for suffix_len in range(max_len, 0, -1):
@@ -241,6 +243,35 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     held = max(held, min(len(text), suffix_len + 1))
                     break
         return held
+
+    def _split_function_bodies(self, region: str) -> list[str]:
+        # One body per <function=...>, cut at its </function>, or at the next <function=... when
+        # the model omitted </function> (and maybe </tool_call>). Tool-call tags left at the end of
+        # a body by such an omission are dropped. The regex approach merged two calls in that case.
+        bodies = []
+        for piece in region.split(self.tool_call_prefix)[1:]:
+            body = piece.split(self.function_end_token, 1)[0].rstrip()
+            stripped = True
+            while stripped:
+                stripped = False
+                for tok in (self.tool_call_end_token, self.tool_call_start_token):
+                    if body.endswith(tok):
+                        body = body[: -len(tok)].rstrip()
+                        stripped = True
+            bodies.append(body)
+        return bodies
+
+    def _close_open_function(self, calls: list[ToolCallItem]) -> None:
+        # The model started a new <tool_call> or <function=...> while the previous function was
+        # still open (it omitted both </function> and </tool_call>): close the previous object.
+        if self.current_func_name is None:
+            return
+        if not self.json_started:
+            calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="{"))
+            self.json_started = True
+        calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="}"))
+        self.current_func_name = None
+        self._reset_streaming_param_state()
 
     def _reset_streaming_param_state(self) -> None:
         self.current_streaming_param_name = None
@@ -296,7 +327,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 )
             self.current_tool_param_count += 1
             self._reset_streaming_param_state()
-            return len(current_slice) - (len(text) - end_pos - end_token_len)
+            # A zero-length terminator (</function>, </tool_call>, <parameter=) may sit in the
+            # held-back pending text, which the buffer no longer holds once an earlier increment
+            # trimmed it. Put whatever follows the value back at the cursor so the main loop
+            # sees the terminator; a negative consumed length would point before the buffer.
+            self._buffer = self._buffer[: self.parsed_pos] + text[end_pos + end_token_len :]
+            return 0
 
         held_len = self._held_streaming_param_suffix_len(text)
         emit_len = max(0, len(text) - held_len)
@@ -328,18 +364,13 @@ class Qwen3CoderDetector(BaseFormatDetector):
         try:
             # Simple cleanup of the text to find tool calls
             # Note: This is a simplified regex approach consistent with vLLM
-            raw_tool_calls = self.tool_call_regex.findall(text)
-            if not raw_tool_calls:
-                # Fallback: maybe the whole text is inside the tag or tags are stripped
-                if self.tool_call_prefix in text:
-                    raw_tool_calls = [text]
+            # Everything from the first <tool_call> on, split per function (see
+            # _split_function_bodies); robust to omitted </function> and </tool_call>.
+            raw_tool_calls = [text[text.find(self.tool_call_start_token) :]]
 
             tool_idx = 0
             for tool_content in raw_tool_calls:
-                # Find function calls
-                funcs = self.tool_call_function_regex.findall(tool_content)
-                for func_match in funcs:
-                    func_body = func_match[0] or func_match[1]
+                for func_body in self._split_function_bodies(tool_content):
                     if ">" not in func_body:
                         continue
 
@@ -419,6 +450,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             # 1. Priority detection: check if it's the start of Tool Call
             # -------------------------------------------------------
             if current_slice.startswith(self.tool_call_start_token):
+                self._close_open_function(calls)
                 self.parsed_pos += len(self.tool_call_start_token)
                 self.is_inside_tool_call = True
                 continue
@@ -431,6 +463,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 if end_angle != -1:
                     func_name = current_slice[len(self.tool_call_prefix) : end_angle]
 
+                    self._close_open_function(calls)
                     self.current_tool_id += 1
                     self.current_tool_name_sent = True
                     self.current_tool_param_count = 0
@@ -474,10 +507,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     # 1. [Normal] Encounter </parameter>
                     # 2. [Abnormal] Encounter next <parameter=
                     # 3. [Abnormal] Encounter </function>
+                    # 4. [Abnormal] Encounter </tool_call> (model omitted </function>, sglang#43150)
                     # So we need to find the smallest one as the parameter end position.
                     cand_end_param = rest_of_slice.find(self.parameter_end_token)
                     cand_next_param = rest_of_slice.find(self.parameter_prefix)
                     cand_end_func = rest_of_slice.find(self.function_end_token)
+                    cand_end_tool = rest_of_slice.find(self.tool_call_end_token)
 
                     candidates = []
                     if cand_end_param != -1:
@@ -488,6 +523,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         candidates.append((cand_next_param, 0))
                     if cand_end_func != -1:
                         candidates.append((cand_end_func, 0))
+                    if cand_end_tool != -1:
+                        candidates.append((cand_end_tool, 0))
 
                     if candidates:
                         best_cand = min(candidates, key=lambda x: x[0])
@@ -540,9 +577,15 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 break
 
             # -------------------------------------------------------
-            # 4. Function End: </function>
+            # 4. Function End: </function>, or </tool_call> while a function is still
+            #    open (the model omitted </function>; sglang#43150, fix from PR #43467).
+            #    On </tool_call> only the object is closed; section 5 consumes the tag.
             # -------------------------------------------------------
-            if current_slice.startswith(self.function_end_token):
+            closes_func = current_slice.startswith(self.function_end_token)
+            if closes_func or (
+                self.current_func_name is not None
+                and current_slice.startswith(self.tool_call_end_token)
+            ):
                 if not self.json_started:
                     calls.append(
                         ToolCallItem(tool_index=self.current_tool_id, parameters="{")
@@ -552,7 +595,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 calls.append(
                     ToolCallItem(tool_index=self.current_tool_id, parameters="}")
                 )
-                self.parsed_pos += len(self.function_end_token)
+                if closes_func:
+                    self.parsed_pos += len(self.function_end_token)
                 self.current_func_name = None
                 self._reset_streaming_param_state()
                 continue
@@ -625,6 +669,13 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self.parsed_pos = 0
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
+        # serving_chat yields an increment's normal text before its tool-call items. On
+        # /v1/messages a text delta closes the open tool_use block, so a '}' that follows in the
+        # same increment (e.g. "</function>\n</tool_call>\n" under speculative decoding) is dropped
+        # with "Dropping tool_call argument delta with no open tool_use block". The newline
+        # between calls carries nothing; drop whitespace-only text that rides with call items.
+        if calls and normal_text and not normal_text.strip():
+            normal_text = ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
 
     def supports_structural_tag(self) -> bool:

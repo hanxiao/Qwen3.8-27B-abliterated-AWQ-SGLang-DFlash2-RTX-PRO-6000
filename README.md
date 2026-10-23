@@ -396,6 +396,24 @@ non-streaming parse of the same text, for eight calls at chunk sizes from 1 to 4
 The image build runs it on the stock parser, which must fail, and on the port, together with the
 Qwen3 Coder tests of SGLang.
 
+On `/v1/messages`, parallel tool calls lost the closing `}` of a call, and the client received
+`{"query": "CEO announcement", "num": 20`. It rejected that as invalid JSON, and the model usually
+retried the same call. The main cause is
+[sglang#42260](https://github.com/sgl-project/sglang/issues/42260). Under speculative decoding, one
+increment can carry `</function>\n</tool_call>\n`. The parser returns the `}` as a call item and the
+newline as text, and `serving_chat` sends the text first. The Anthropic adapter closes the open
+`tool_use` block on that text, then drops the `}` and logs *Dropping tool_call argument delta with no
+open tool_use block*. With a prompt that asks for two parallel calls, 8 of 48 calls on the previous
+revision came back invalid. The port drops whitespace-only text that arrives in the same increment
+as call items, and 48 of 48 now come back valid. The OpenAI endpoint accumulates arguments by index
+and was never affected.
+
+The port also closes calls the model leaves open: `</tool_call>` without `</function>`
+([sglang#43150](https://github.com/sgl-project/sglang/issues/43150), the change of
+[PR #43467](https://github.com/sgl-project/sglang/pull/43467)), or neither closing tag before the next
+`<tool_call>`. In the second case, the non-streaming parse also merged two calls into one, so it now
+splits calls at `<function=`. `docker/test_stream.py` covers all of these shapes.
+
 ## Structured output
 
 With DFlash 2, a request that carries `response_format` (JSON schema) or `tool_choice: "required"`
