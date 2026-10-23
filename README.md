@@ -9,10 +9,10 @@
 | GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
 | Slots | 2 concurrent requests |
 | Context | **262,144** tokens per request; one 314,253-token FP8 KV pool shared by both slots |
-| Decode, one stream | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
-| Decode, two streams | 133.5 tok/s each, 208.5 tok/s in total |
-| Decode, thinking on, sampled | 126.5 tok/s, 3.60 tokens per verification |
-| Decode with a long context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
+| Decode, greedy, thinking off | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
+| Decode, greedy, thinking off, two streams | 133.5 tok/s each, 208.5 tok/s in total |
+| Decode, sampled, thinking on | 126.5 tok/s, 3.60 tokens per verification |
+| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
 | Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
 | Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at two concurrent streams |
