@@ -112,7 +112,7 @@ spec:
             - -c
           args:
             - >-
-              pip install -q google-cloud-storage &&
+              pip install -q 'google-cloud-storage==3.17.1' &&
               python3 /gcs/gcsdl.py BUCKET huihui-awq/out=/tmp/model dflash2=/tmp/dflash2 &&
               exec python3 -m sglang.launch_server
               --model-path=/tmp/model

@@ -257,6 +257,21 @@ throughput scales with slots while single-stream latency does not move:
 (the README's older "208.5 in total" for two streams); the last column is every completion token over
 the round's wall time, so it pays for prefill and queueing.
 
+More slots buy more total and cost per-request latency, because `slots × block` is what the verify
+batch pays for. Measured on the same card, same hour, driver bench (7 workloads, 600-token answers):
+
+| slots × block | single stream | total at full occupancy | per stream there |
+| --- | ---: | ---: | ---: |
+| 2 × 16 | 151.4 | 208 (C=2) | 133.5 |
+| **8 × 8 (deployed)** | **138.4** | **840 (C=8)** | **105.0** |
+| 16 × 4 | 97.0 | 1170 (C=16) | 73.1 |
+| 24 × 2 | 58.3 | 1037 (C=24) | 43.2 |
+
+Block 4 and block 2 lose single-stream acceptance (3.06 and 1.87 tokens per verify against 4.07),
+which is why the deployed point is the one that moves throughput without moving latency. Two
+step-time cuts do not work on this version: `--enable-two-batch-overlap` and
+`SGLANG_DFLASH_DRAFT_HEAD=int4` both crash the scheduler at startup with DFLASH.
+
 ### The 32-row ceiling
 
 Every configuration with `slots × num_draft_tokens > 32` used to die at startup with
