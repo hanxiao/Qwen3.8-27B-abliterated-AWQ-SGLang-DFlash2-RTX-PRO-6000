@@ -10,7 +10,7 @@
 | Slots | 8 concurrent requests |
 | Context | **262,144** tokens per request; one 335,498-token FP8 KV pool shared by all eight slots |
 | Decode, greedy, thinking off | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
-| Decode, greedy, thinking off, eight streams | 105.0 tok/s each, **840 tok/s in total** (602.5 tok/s over the round's wall time, prefill included) |
+| Decode, greedy, thinking off, eight streams | 105.0–112.3 tok/s each, **840–898 tok/s in total** (582–603 tok/s over the round's wall time, prefill included) |
 | Decode, sampled, thinking on | 126.5 tok/s, 3.60 tokens per verification |
 | Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k (one stream; with two long requests the pool holds them) |
 | Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
@@ -250,7 +250,7 @@ throughput scales with slots while single-stream latency does not move:
 | 1 | 119.3 tok/s | 119.3 tok/s | 99.6 tok/s |
 | 2 | 119.8 tok/s | 239.6 tok/s | 190.4 tok/s |
 | 4 | 106.1 tok/s | 424.4 tok/s | 291.0 tok/s |
-| 8 | 105.0 tok/s | **840.0 tok/s** | **602.5 tok/s** |
+| 8 | 105.0–112.3 tok/s | **840–898 tok/s** | 582–603 tok/s |
 | 16 | 100.3 tok/s | (eight slots, queueing) | 446.8 tok/s |
 
 `scripts/bench3.py`, fourteen prompts, greedy with thinking off. Per-stream figures are decode only
@@ -263,7 +263,7 @@ batch pays for. Measured on the same card, same hour, driver bench (7 workloads,
 | slots × block | single stream | total at full occupancy | per stream there |
 | --- | ---: | ---: | ---: |
 | 2 × 16 | 151.4 | 208 (C=2) | 133.5 |
-| **8 × 8 (deployed)** | **138.4** | **840 (C=8)** | **105.0** |
+| **8 × 8 (deployed)** | **138.4** | **840–898 (C=8)** | **105.0–112.3** |
 | 16 × 4 | 97.0 | 1170 (C=16) | 73.1 |
 | 24 × 2 | 58.3 | 1037 (C=24) | 43.2 |
 
