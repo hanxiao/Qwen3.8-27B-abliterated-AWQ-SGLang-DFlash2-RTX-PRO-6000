@@ -12,7 +12,7 @@
 | Decode, greedy, thinking off | **141.2 tok/s** (prose 89.1, chat 98.0, translation 101.7, summary 117.9, code 193.3, math 184.0, JSON 204.6) |
 | Decode, greedy, thinking off, eight streams | 105.0–112.3 tok/s each, **840–898 tok/s in total** (582–603 tok/s over the round's wall time, prefill included) |
 | Decode, sampled, thinking on | 126.5 tok/s, 3.60 tokens per verification |
-| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k (one stream; with two long requests the pool holds them) |
+| Decode, greedy, thinking off, long context | 73.5 tok/s at 34k tokens, 70.0 at 115k (one stream, eight slots; the pool holds two 115k runs beside short ones) |
 | Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
 | Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
 | Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at two concurrent streams |
@@ -290,11 +290,14 @@ flat part of it. Block 16 doubles the rows for 8% more acceptance, so it is the 
 single stream (153.7 tok/s with `--enable-torch-compile`) and the wrong one for throughput.
 
 DFlash 2 has an open report of wrong answers, and of prompts appearing in other conversations, under
-concurrent load (sglang#36548). `scripts/qcon.py` runs 64 problems with checkable answers,
-three-step arithmetic and four-person ordering puzzles, greedy with thinking on, once alone and once
-at two streams interleaved with unrelated essay and code requests. All 64 answers are right in both
-runs, and none contains a word from the other requests. Of the 64 answers, 29 are byte-identical
-across the two runs, because a verify batch of a different size rounds differently.
+concurrent load (sglang#36548) — "DFlash8 at concurrency 8: 7/100 wrong", blamed on a GDN
+decode-vs-verify numerical drift that batch composition amplifies. `scripts/qcon.py` runs 64
+problems with checkable answers, three-step arithmetic and four-person ordering puzzles, greedy with
+thinking on, once alone and once at concurrent streams interleaved with unrelated essay and code
+requests. All 64 answers are right in both runs at **C=2 and at C=8**, and none contains a word from
+the other requests (69 s concurrent against 148 s serial). The reporter's own mitigation was a dense
+BF16 `lm_head`, which this checkpoint has; re-run qcon at the deployed concurrency after changing the
+state dtype or the decode-graph batch sizes.
 
 SGLang schedules a waiting prefill ahead of decode, so a long prompt that arrives while the other
 slot is answering stalls that answer. `--prefill-decode-interval N` runs decode steps after each
