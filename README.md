@@ -1,54 +1,61 @@
-# Qwen3.8-27B abliterated · AWQ-INT4 · SGLang + DFlash 2 · NVIDIA RTX PRO 6000
+# Qwen3.8-27B abliterated · own NVFP4/FP8 quant · SGLang + DFlash 2 · NVIDIA RTX PRO 6000
+
+The repository name still says AWQ. Production served an AWQ-INT4 build until 2026-10-24 and now
+serves our own mixed NVFP4/FP8 quantization of the same abliterated weights. The repository keeps
+its name, and the served model name stays `Qwen3.8-27B-abliterated-AWQ-INT4` so that clients need
+no change. [AWQ build, 2026-10-23](#awq-build-2026-10-23-previous-production) keeps the figures of
+the previous production.
 
 | | |
 | --- | --- |
-| Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
-| Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
-| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
-| Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with six patches in `docker/`, FlashInfer attention and GDN prefill kernels |
+| Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here to mixed NVFP4/FP8 with NVIDIA ModelOpt 0.47 (`quant/modelopt/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
+| Weights | FP8 W8A8 attention and GDN projections, NVFP4 W4A4 MLPs, NVFP4 `lm_head` served as W4A16; 20.18 GB resident |
+| Accuracy | KL 0.0497 to BF16 and 92.5% top-1 agreement on our private corpus; the AWQ build had 0.0346 and 94.5% |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.51 GB), 8 draft tokens per block |
+| Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with six patches in `docker/`, FlashInfer attention and GDN prefill kernels, FlashInfer CuTe-DSL NVFP4 GEMM |
 | GPU | one whole NVIDIA RTX PRO 6000 Blackwell (96 GB, SM120) on Cloud Run, with 20 vCPU and 80 GiB |
 | Slots | 16 concurrent requests, fp32 recurrent state |
-| Context | **262,144** tokens per request; one 1,011,164-token FP8 KV pool shared by the 16 slots |
-| Decode, greedy, thinking off | **231.7 tok/s** (prose 145.3, chat 164.2, translation 166.2, summary 187.7, code 320.1, math 296.0, JSON 342.5) |
-| Decode, greedy, thinking off, concurrent streams | 197.7 tok/s each and **562.5** in total at four streams, 170.8 each and **863.3** in total at eight, about 962 in total at 16 |
-| Decode, sampled, thinking on, coding agent | 209 tok/s at 30k tokens of code context, 219 at 60k, 192 at 120k |
-| Prefill | 5,417 tok/s at 9k tokens, 4,958 at 31k, 3,570 at 124k |
-| Time to first token, coding agent | 5.5 s at 30k, 12.8 s at 60k, 32.5 s at 120k; a follow-up turn 0.34 s at 30k and 0.46 s at 60k |
-| Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
-| Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at 16 concurrent streams; greedy text byte-identical to the four-slot flags on the same card on 24 of 24 and 14 of 14 prompts |
+| Context | **262,144** tokens per request; one 492,440-token BF16 KV pool shared by the 16 slots |
+| Prefill | **12,003 tok/s** at 9k tokens, 11,223 at 31k, 6,728 at 124k, which is 2.2, 2.2 and 1.9 times the AWQ build |
+| Time to first token, coding agent | **2.5 s** at 30k tokens of code context, 6.2 s at 60k, 17.2 s at 120k; a follow-up turn 0.39 s at 30k, 0.70 s at 60k, 1.01 s at 120k |
+| Decode, greedy, thinking off | **235.4 tok/s** (prose 153.9, chat 176.1, translation 153.7, summary 198.4, code 320.4, math 313.5, JSON 332.0) |
+| Decode, sampled, thinking on, coding agent | **220 tok/s** at 30k tokens of code context, 199 at 60k, 192 at 120k; per stream at two and three streams, see [Production, 2026-10-24](#production-2026-10-24) |
+| Refusals | not measured again on this build; on the AWQ build, 0 of 6 borderline prompts, against 5 for the stock model |
+| Quality | needle retrieval 5/5 at 30k and 120k tokens, multi-step math 12/12, `qcon.py` 63 of 64 alone and at three streams (a different ordering puzzle missed each time), ten of ten facts across a conversation served from cache, 16 of 16 parallel tool-call cases |
 | Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
 | Tool calls | arguments stream as they are generated, at most 0.1 s apart; earlier thinking reaches the template natively, so each tool round hits the prefix cache |
 | Structured output | not supported: `response_format` and `tool_choice: "required"` return 400 |
 | Disconnects | a client that disconnects frees its slot within a second |
-| Cold start | 13 min 24 s from instance start to ready; one instance stays warm |
+| Cold start | 14 min 26 s from instance start to ready; one instance stays warm |
 
-We measure decode with `scripts/bench2.py`, which streams each answer and divides the tokens after
-the first by the time from the first to the last token. Each of seven workloads runs two prompts of
-up to 800 tokens, greedy with thinking off unless stated. Sampled decode comes from
-`scripts/accept.py`, fourteen prompts with thinking on, averaged over three runs, and
-`scripts/bench3.py` sends the same fourteen prompts over 1, 2, 4 or 8 connections at once. Its
-per-stream figure is the bench2 rate, and its total is every completion token over the wall time of
-the round, so prefill and queueing count. Prefill is the time to first token on prompts of unique
-random words, so that no prefix is cached. The coding-agent figures come from a separate benchmark
-that streams `/v1/messages` with three tools, thinking on at the default effort of the template and
-the default sampling of the model, over 29k, 59k and 119k tokens of SGLang source; a follow-up turn
-is one more user message after the answer.
+These figures come from different measurements:
 
-Production has served from a whole card since 2026-10-23, revision `qwen38-exp-e-full-arh-m1`. The
-greedy decode, concurrency, prefill and quality figures above were measured that day on a test
-service with the flags of production and the image before the reasoning-history patch, which
-changes only how `/v1/messages` renders earlier thinking; bench2 and bench3 use chat completions.
-They are medians of three runs. The coding-agent figures come from a second set of test services the
-same night, and the follow-up time to first token was measured with the patch. Refusals, vision,
-the 0.1 s tool-call streaming figure and disconnects were measured on the half card; refusals
-depend only on the weights. Unless a section says otherwise, the sections
-from [Checkpoint](#checkpoint) to [Vision](#vision) report measurements on the half card that
-production used until 2026-10-23, and [Half card, 2026-10-23](#half-card-2026-10-23) keeps its
-headline figures.
+- **Prefill, KL and HumanEval:** test services on 2026-10-24 that ran the production flags without
+  block verification, ReplaySSM, `--prefill-decode-interval` and HTTP/2 (see
+  [Quantization](#quantization)).
+- **Everything else in the table:** the production revision itself, `qwen38-exp-e-ownq8`. We
+  measured it through a tagged URL with no traffic, before the cutover.
+
+How the benchmarks work:
+
+- **Decode:** `scripts/bench2.py` streams each answer and divides the tokens after the first by the
+  time from the first to the last token. Each of seven workloads runs two prompts of up to 800
+  tokens, greedy with thinking off unless stated. The table gives the median of three runs.
+- **Prefill:** the time to first token on prompts of unique random words, so that no prefix is
+  cached.
+- **Coding agent:** a separate benchmark streams `/v1/messages` with three tools and thinking on, at
+  the default effort of the template and the default sampling of the model. The contexts are 29k,
+  59k and 119k tokens of SGLang source. A follow-up turn is one more user message after the answer,
+  with the earlier thinking in the history.
+
+The other sections were mostly measured on the AWQ build: [Checkpoint](#checkpoint-awq-build-production-until-2026-10-24)
+to [Vision](#vision) on the half card it used until 2026-10-23, and
+[Full card, 2026-10-23](#full-card-2026-10-23) on the whole card. Where a section says nothing
+else, read its figures as AWQ figures.
 
 ```bash
-bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + six patches, into Artifact Registry
-gcloud alpha run services replace quant/service.yaml  # once: quantize into the bucket (~75 min)
+bash docker/build.sh                                            # lmsysorg/sglang:v0.5.22 + six patches, into Artifact Registry
+gcloud alpha run services replace quant/modelopt/service.yaml   # once: quantize into the bucket (ModelOpt, mixed NVFP4/FP8)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
 
@@ -72,9 +79,120 @@ Prefill is bound by compute and runs at about 145 TFLOP/s at 9k tokens on the ha
 1.65 times as fast (231.7 against 140.5 tok/s in bench2) and prefills 9k tokens 1.9 times as fast
 (5,417 against 2,783 tok/s).
 
-## Checkpoint
+## Quantization
 
-The tables in this section were measured on the half card.
+Production serves our own mixed NVFP4/FP8 quantization of the same BF16 abliterated checkpoint,
+`huihui-ai/Huihui-Qwen3.8-27B-abliterated`, that the earlier AWQ build came from. No third-party
+checkpoint is involved. `quant/modelopt/` has the scripts.
+
+- **Tool:** NVIDIA ModelOpt 0.47.0 (`quant/modelopt/mo.py`). It runs as a Cloud Run service on one
+  whole RTX PRO 6000 (`quant/modelopt/job.sh`), because Cloud Run caps GPU jobs at one hour.
+- **Precision layout:**
+  - FP8 per-tensor W8A8 with static scales: the attention projections (`self_attn.q/k/v/o_proj`)
+    and the GDN projections (`linear_attn.in_proj_qkv`, `in_proj_z` and `out_proj`).
+  - NVFP4 W4A4 with group 16: every MLP (`gate_proj`, `up_proj` and `down_proj`).
+  - BF16: GDN `in_proj_a/b`, `conv1d`, the vision tower and the embeddings.
+  - The FP8 and NVFP4 GEMMs run on the FP8 and FP4 tensor cores of SM120. AWQ W4A16 runs on BF16
+    tensor cores, so prefill is about twice as fast.
+- **Weight scales:** ModelOpt `local_hessian` with the FP8 scale sweep for the NVFP4 block scales.
+  ModelOpt defaults to `max`, which gives plain round-to-nearest scales.
+- **Calibration:** 583 samples and 1.34M tokens, each at most 4,096 tokens long, all rendered with
+  the chat template of the model (`quant/modelopt/build_calib.py`).
+  - 46% agentic and tool-call data: SWE trajectories from OpenHands/SWE-Gym and Nemotron-SWE, plus
+    70 tool-call conversations rendered through the native `tools=` path of the template.
+  - 26% code: real files from the SGLang repository, framed as review, refactor and test requests
+    in English and Chinese, plus six windows of the coding-agent benchmark context.
+  - 21% Chinese chat and 6% English chat (sharegpt_gpt4).
+  - 1% math and STEM from the calibration set of the AWQ build.
+  - The private documents of the KL evaluation (`scripts/fid.py`) are held out.
+- **`lm_head`:** the head is exported as NVFP4 but served as `W4A16_NVFP4`, meaning NVFP4 weights
+  with BF16 activations on Marlin (`quant/modelopt/w4a16head.py`).
+  - This edits the config only; the head is not quantized again.
+  - It reads the same 0.64 GB per verify step as NVFP4 W4A4, but it no longer quantizes its input
+    to FP4.
+  - Against the plain NVFP4 head it lowers KL from 0.0532 to 0.0497 at the same decode.
+  - DFlash ranks draft candidates with the same quantized head, so the int8 draft head
+    (`SGLANG_DFLASH_DRAFT_HEAD`) is unset. It works only with a BF16 head.
+- **KV cache:** ModelOpt also calibrates FP8 KV scales. Production serves a BF16 KV cache, so
+  `quant/modelopt/stripkv.py` removes `kv_cache_scheme` and `kv_cache_quant_algo` from
+  `config.json` and `hf_quant_config.json`.
+  - With those fields left in, a BF16 KV cache produces garbage output.
+  - The bucket keeps both variants: `ownq/molh-w4h-bkv` with the fields stripped, for
+    `--kv-cache-dtype bf16`, and `ownq/molh-w4h` with them kept, for `fp8_e4m3`.
+
+KL comes from `scripts/fid.py` against the BF16 checkpoint, on the private corpus of agent answers,
+code, documents and Chinese text. Every row was measured on the whole card with image `b4802ba` and
+8 draft tokens. The first three rows come from an earlier study the same day. Our rows use the
+production flags without block verification, ReplaySSM, the prefill-decode interval and HTTP/2
+(see [Production, 2026-10-24](#production-2026-10-24) for the deployed flags).
+
+| Build (body / `lm_head` / KV) | Prefill at 9k / 31k / 124k, tok/s | TTFT at 30k / 60k / 120k | bench2 | KL to BF16 (code / Chinese), top-1 | GSM8K of 200 | HumanEval 41×2 | Parallel tool calls |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| AWQ W4A16 (previous production), BF16 head, FP8 KV | 5,401 / 5,105 / 3,563 | 5.6 / 12.8 / 32.6 s | 232.9 | 0.0346 (0.008 / 0.103), 94.5% | 191 | 80/82 | 16/16 |
+| third-party mixed NVFP4/FP8 (edp1096, ModelOpt `max`) | 11,970 / 10,808 / 6,741 | 2.5 / 6.2 / 17.2 | 236.5 | 0.0606 (0.018 / 0.149), 91.0% | | | |
+| own GPTQ (llm-compressor), BF16 head | 11,830 / 11,324 / 6,825 | 2.5 / 6.1 / 17.1 | 220.0 | 0.0553 (0.013 / 0.142), 92.6% | 193 | | |
+| **lh-wb: local-Hessian / W4A16-NVFP4 / BF16 (deployed)** | **12,003 / 11,223 / 6,728** | **2.6 / 6.3 / 17.3** | **236.1** | **0.0497 (0.0134 / 0.1315), 92.5%** | 192 | 79/82 | 16/16 |
+| lh-wf: local-Hessian / W4A16-NVFP4 / FP8 | 11,839 / 10,084 / 5,475 | 2.7 / 7.3 / 21.1 | 225.5 | 0.0512 (0.0135 / 0.1358), 92.5% | 192 | | |
+| lh-nb: local-Hessian / NVFP4 / BF16 | 11,241 / 11,215 / 6,736 | 2.5 / 6.2 / 17.2 | 237.3 | 0.0532 (0.0149 / 0.1362), 91.9% | 189 | 80/82 | 16/16 |
+| lh-nf: local-Hessian / NVFP4 / FP8 | 11,489 / 10,280 / 5,495 | 2.8 / 7.2 / 21.0 | 225.1 | 0.0546 (0.0151 / 0.1404), 91.7% | 193 | | 16/16 |
+| lh-fb: local-Hessian / FP8 / BF16 | 12,049 / 10,832 / 6,640 | 2.5 / 6.3 / 17.5 | 224.1 | 0.0471 (0.0124 / 0.1282), 93.0% | 192 | 80/82 | 16/16 |
+| lh-ff: local-Hessian / FP8 / FP8 | 11,574 / 10,084 / 5,466 | 2.7 / 7.2 / 21.1 | 224.8 | 0.0485 (0.0126 / 0.1326), 93.0% | 191 | 80/82 | 16/16 |
+| lh-bb: local-Hessian / BF16 + int8 draft head / BF16 | 11,250 / 11,165 / 6,727 | 2.5 / 6.3 / 17.3 | 220.0 | **0.0457** (0.0119 / 0.1264), 93.3% | 190 | 80/82 | 16/16 |
+
+How to read the table:
+
+- Every build scored needle retrieval 5/5 at 30k and 120k tokens and math 12/12.
+- HumanEval runs 41 problems, two samples each, with thinking on. HumanEval/145 fails on every
+  build, AWQ included, so 80/82 is the ceiling. The one extra miss of lh-wb is one sample of
+  HumanEval/125.
+- The parallel tool-call check sends 8 prompts twice over `/v1/messages`. A case passes only with
+  the exact number of calls, the names, the arguments and `stop_reason`.
+
+lh-wb is on the Pareto frontier of KL against decode, with lh-bb (KL 0.046, 220 tok/s) and lh-fb
+(0.047, 224).
+
+- **Against AWQ:** 2.2 times the prefill at 9k and 31k tokens and 1.9 times at 124k, the same
+  decode, and KL 0.050 against 0.035.
+- **Against the third-party build:** the same speed and 18% lower KL.
+
+FP8 KV would double the pool, but it costs 8 to 19% of prefill at 31k to 124k tokens, about 5% of
+decode and about 0.0015 of KL.
+
+The offline proxy, fake-quantized KL over the BF16 top-64 on held-out documents, shows where the
+gain came from. These are cumulative steps, all with our calibration set:
+
+| Step | Proxy KL | Served KL |
+| --- | ---: | ---: |
+| ModelOpt `max` (the edp1096 recipe on our weights), NVFP4 head | 0.0681 | |
+| + MSE FP8-scale sweep for the NVFP4 weight scales | 0.0558 | |
+| + local-Hessian weighting instead | 0.0549 | 0.0532 |
+| + head served as W4A16 (same weights) | | **0.0497** |
+| + FP8 head instead | 0.0494 | 0.0471 |
+| + BF16 head | | 0.0457 |
+
+We put each group back in BF16 on its own, starting from the `max` build:
+
+- All MLPs: KL 0.068 → 0.032. MLP activations alone: 0.050.
+- The head: 0.059.
+- The GDN projections: 0.064.
+- Attention: no change.
+
+The error is spread over the layers. Putting the 12 most sensitive MLP layers back in BF16 reaches
+only 0.058, which the scale search gives for free, so no layer is excluded. We did not try:
+
+- ModelOpt GPTQ: its layerwise mode cannot find the nested layers of the VLM.
+- AWQ-lite: its scale would have to be folded into the `(1+w)` RMSNorm.
+- SVDQuant: SGLang's mixed-precision path does not load the LoRA branch.
+
+Downloading the 55.6 GB BF16 checkpoint takes 17.5 minutes, since
+these services reach the bucket at about 55 MB/s, so `job.sh` keeps the BF16 copy and
+polls a queue directory for more variants.
+
+## Checkpoint (AWQ build, production until 2026-10-24)
+
+This section describes the AWQ-INT4 build that production served until 2026-10-24, and how it was
+chosen. [Quantization](#quantization) describes the build that replaced it. The tables in this
+section were measured on the half card.
 
 We serve the abliterated Qwen3.8-27B of huihui-ai, in which the residual-stream direction that
 mediates refusals is projected out of the weights. Of six borderline prompts in
@@ -253,12 +371,12 @@ tok/s to 5,900 and 5,180. With it, a turn served from the radix cache and the sa
 from scratch produce identical greedy text. The kernel needs CUDA 13 and prefill chunks of at most
 8,192 tokens. The half card ran 4,096-token chunks; the whole card runs 8,192.
 
-AWQ W4A16 prefills on BF16 tensor cores. A separate study on the whole card on 2026-10-24, not
-deployed, served mixed checkpoints with an NVFP4 MLP and FP8 attention and GDN projections, which
-multiply on FP4 and FP8 tensor cores. The fastest prefilled at 11,970 tok/s at 9k tokens, 10,808 at
-31k and 6,741 at 124k, against 5,401, 5,105 and 3,563 for the production AWQ checkpoint in the same
-study, with KL 0.0606 to BF16 against 0.0346. Our own mixed NVFP4/FP8 quantization is work in
-progress.
+AWQ W4A16 prefills on BF16 tensor cores. Our mixed NVFP4/FP8 checkpoint (see
+[Quantization](#quantization)) multiplies on FP4 and FP8 tensor cores. On test services it
+prefilled 12,003 tok/s at 9k tokens, 11,223 at 31k and 6,728 at 124k, against 5,401, 5,105 and
+3,563 for the AWQ checkpoint in the same study. This is the main reason production moved to it on
+2026-10-24. The FP8 KV cache costs a further 8 to 19% of prefill at 31k to 124k tokens, which is
+why production now runs a BF16 KV cache.
 
 ## Concurrency
 
@@ -348,7 +466,20 @@ keeps interval 40 with 8,192-token chunks on the whole card; we did not repeat t
 
 ## Memory
 
-On the whole card with 16 slots, `/get_server_info` reports 19.11 GB of target weights, a 30.86 GB
+The production revision since 2026-10-24 serves the mixed checkpoint with a BF16 KV cache. On it,
+`/get_server_info` reports:
+
+- 20.18 GB of target weights;
+- a 30.06 GB target KV pool of 492,440 tokens;
+- 12.90 GB free after startup;
+- `max_req_input_len` 262,138, so a single request still gets the full context.
+
+A BF16 token takes twice the bytes of an FP8 one, so the pool holds about half the tokens. Agent
+runs here reach 115k tokens of context at the median, so the pool holds about four such runs at
+once. Three concurrent 120k-token sessions ran in the coding-agent benchmark (see
+[Production, 2026-10-24](#production-2026-10-24)).
+
+On the AWQ build, whole card with 16 slots, `/get_server_info` reports 19.11 GB of target weights, a 30.86 GB
 target KV pool of 1,011,164 tokens and 13.16 GB free after startup, at `--mem-fraction-static
 0.79`. The usable context is still 262,138 tokens, and a 259,728-token prompt was served (106.7 s to
 the first token). The rest of this section is the accounting of the half card.
@@ -512,7 +643,12 @@ answer.
 ## Flags
 
 `--attention-backend flashinfer` is required on SM120, which has no `trtllm_mha`.
-`--kv-cache-dtype fp8_e4m3` is the lowest KV precision SGLang supports for a hybrid GDN model.
+`--kv-cache-dtype bf16` is what production has served since 2026-10-24. FP8 KV doubles the pool,
+but on the mixed checkpoint it costs 8 to 19% of prefill at 31k to 124k tokens and about 5% of
+decode (see [Quantization](#quantization)). The AWQ build ran `fp8_e4m3`, the lowest KV precision
+SGLang supports for a hybrid GDN model. A ModelOpt checkpoint with FP8 KV scales must not be served
+with a BF16 KV cache, as its output is then garbage. `quant/modelopt/stripkv.py` removes the scales.
+`--fp4-gemm-backend flashinfer_cutedsl` selects the NVFP4 GEMM of the MLPs.
 `--tool-call-parser qwen3_coder` parses the `<tool_call><function=…>` format of this chat template,
 which the `hermes` parser drops. `--speculative-draft-attention-backend flashinfer` gives the
 drafter the attention kernels of the target. `--enable-cache-report` reports cache hits to clients,
@@ -520,7 +656,10 @@ as `cache_read_input_tokens` on `/v1/messages` and `prompt_tokens_details` on ch
 `--cuda-graph-max-bs-decode 16` captures the decode and verify graphs for batch sizes 1 to 16, one
 per slot count. `--chunked-prefill-size 8192` and `--max-prefill-tokens 8192` set the prefill chunk,
 the largest the FlashInfer GDN kernel takes; 16,384-token chunks with the Triton GDN kernel did not
-shorten the time to first token. `SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2` sets the tile of the
+shorten the time to first token. The two `SGLANG_DFLASH_DRAFT_HEAD*` variables below belong to the
+AWQ build, whose head is BF16. The mixed checkpoint has a quantized head, and the int8 draft head
+works only with a BF16 head, so production leaves both unset since 2026-10-24.
+`SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2` sets the tile of the
 int8 draft-head kernel (BN, BK, warps, stages): above 32 draft rows per verify batch, slots times
 block, the kernel tiles 64 rows, and on the half card its default tile `128,256,8,3` then needed
 131,072 bytes of shared memory against the 101,376 of the partition, so the server failed at
@@ -542,8 +681,17 @@ agent turn that writes a long file in one tool call run for up to an hour. The s
 `ALPHA` launch stage, without which Cloud Run refused the 64 GiB memory limit of the half card; we
 kept it for the 80 GiB limit of the whole card and did not try without it.
 
-The production service is `qwen38-exp-e` in us-central1. Since 2026-10-23 all its traffic goes to
-the whole-card revision `qwen38-exp-e-full-arh-m1`, which this file describes: image
+The production service is `qwen38-exp-e` in us-central1. Since 2026-10-24 all its traffic goes to
+the revision that serves the mixed checkpoint, which `cloudrun/service.yaml` describes (see
+[Production, 2026-10-24](#production-2026-10-24)). Its image, flags and Cloud Run settings are those
+of the previous revision, with these differences:
+
+- the weights are `ownq/molh-w4h-bkv/` instead of `huihui-awq/out/`;
+- `--kv-cache-dtype bf16` replaces `fp8_e4m3`, and `--fp4-gemm-backend flashinfer_cutedsl` is added;
+- both `SGLANG_DFLASH_DRAFT_HEAD*` variables are removed.
+
+From 2026-10-23 to 2026-10-24 all traffic went to the whole-card AWQ revision
+`qwen38-exp-e-full-arh-m1`, which stays on the service as the rollback target: image
 `qwen38-sglang:v0.5.22-patched6-arh` (sha256:b4802ba90a231ef286904b5788d6e612fb76403c6a8c3dcd1642b1aee75327a6),
 16 slots and `minScale: '1'`. On the night of the switch, two whole-card revisions ran with
 `minScale: '0'`: `qwen38-exp-e-full-e`, with the same flags and the image before the
@@ -574,6 +722,16 @@ slot; decode speed is the same under both servers. SGLang returns 400 when the p
 
 ## Cold start
 
+The production revision since 2026-10-24, `qwen38-exp-e-ownq8`, took 14 min 26 s from instance
+start to ready on its first start (16:26:36 to 16:41:02 UTC, from its log):
+
+- about 9 minutes to download the target and the drafter and start SGLang (`server_args` at
+  16:35:40);
+- 18 s to load the target weights;
+- about 5 minutes for the pools, autotune, CUDA graphs and warmup.
+
+The figures below are for the AWQ build.
+
 On the whole card, the 16-slot test service took 13 min 24 s from instance start to a ready server
 on 2026-10-23. Production keeps one instance warm (`minScale: '1'`), so a cold start occurs only
 when a revision is replaced. While production ran with `minScale: '0'`, we measured part of a start
@@ -596,6 +754,151 @@ according to the timestamps of its startup log on 2026-10-23:
 `gcsdl.py` copies both models to local disk with parallel ranged downloads of the storage client,
 after which SGLang loads the target in 16 seconds. Loading the target through the gcsfuse mount
 takes 849 s, because safetensors reads through the mount in small pieces.
+
+## Production, 2026-10-24
+
+On 2026-10-24 production moved from the AWQ build to our mixed NVFP4/FP8 checkpoint (see
+[Quantization](#quantization)). We added two revisions to the production service, each with 0%
+traffic and its own tag, while all traffic stayed on the AWQ revision `qwen38-exp-e-full-arh-m1`.
+They had the image and flags of production, with these differences:
+
+- the weights `ownq/molh-w4h-bkv`, a BF16 KV cache and the CuTe-DSL NVFP4 GEMM;
+- no int8 draft head;
+- `qwen38-exp-e-ownq8` kept 8 draft tokens per block, and `qwen38-exp-e-ownq16` used
+  `--speculative-num-draft-tokens 16`.
+
+We ran every check against the tag URLs, then moved all traffic to `qwen38-exp-e-ownq8`. The AWQ
+column comes from the test services of [Full card, 2026-10-23](#full-card-2026-10-23), with the same
+flags and the same benchmark. Its one-stream coding-agent row is the deployed revision with the
+reasoning-history patch, three runs. Its two- and three-stream rows come from the same flags without
+the patch.
+
+| | AWQ, 8 draft tokens (previous) | **mixed, 8 draft tokens (deployed)** | mixed, 16 draft tokens |
+| --- | ---: | ---: | ---: |
+| Needle 30k / 120k, math | 5/5, 5/5, 12/12 | 5/5, 5/5, 12/12 | 5/5, 5/5, 12/12 |
+| `qcon.py`, alone / three streams | – / 64/64 | 63/64 / 63/64 | 64/64 / 64/64 |
+| Parallel tool calls, `/v1/messages` (8 cases × 2; non-streaming + streaming) | 16/16; 8 of 8 | 16/16; 8/8 + 8/8 | 16/16; 8/8 + 8/8 |
+| `toolstream.py`, 1,500 integers: longest silence, call | 0.1 s (3,000 integers, half card) | 0.1 s, 15.5 s | 0.1 s, 10.7 s |
+| `prefix.py`, facts / prompt served from cache | 10/10 | 10/10, 99.6% | 10/10, 99.6% |
+| `apitest.py` (400 for grammar, tool calls, cache report, 1 MP image) | pass | pass | pass |
+| bench2, greedy, mean of seven | 231.7 | **235.4** | 259.5 |
+| bench2, prose / chat, greedy | 145.3 / 164.2 | 153.9 / 176.1 | 133.3 / 145.3 |
+| bench2, code / math / JSON | 320.1 / 296.0 / 342.5 | 320.4 / 313.5 / 332.0 | 392.9 / 369.0 / 439.8 |
+| Coding agent, one stream, at 30k / 60k / 120k | 207 / 207 / 189 (n3) | **220 / 199 / 192** (n8) | 221 / 170 / 170 (n8) |
+| Coding agent, per stream at two streams | 175 / 148 / 131 | 168 / 152 / 134 | 165 / 165 / 124 |
+| Coding agent, per stream at three streams | 156 / 126 / 80 | 156 / 125 / 99 | 167 / 128 / 105 |
+| Coding agent, time to first token | 5.5 / 12.8 / 32.6 s | **2.5 / 6.2 / 17.2 s** | 2.5 / 6.2 / 17.2 s |
+| Coding agent, follow-up time to first token | 0.34 / 0.46 / 1.54 s | 0.39 / 0.70 / 1.01 s | 0.38 / 0.69 / 1.22 s |
+| Tokens per verification, one stream | 4.31 / 4.53 / 4.39 | 4.51 / 4.34 / 4.40 | 5.01 / 4.33 / 4.78 |
+| KV pool | 1,011,164 FP8 | 492,440 BF16 | 492,440 BF16 |
+
+Notes on the table:
+
+- **Coding-agent rows:** medians over all runs. The two-stream rows have four runs each and the
+  three-stream rows six.
+- **Follow-up turn:** it carries the earlier thinking in the history. The server reported 94–99%
+  of its prompt as served from cache.
+- **Three streams at 120k tokens:** three concurrent sessions with 118k-token prompts ran with no
+  request errors.
+- **Missed `qcon.py` answers on ownq8:**
+  - Alone, one ordering puzzle got a wrong order.
+  - At three streams, a different ordering puzzle fell into a greedy repetition loop until
+    `max_tokens`.
+  - No answer contained a word from the other requests. This is the only check where the mixed
+    build scored below AWQ.
+
+**8 against 16 draft tokens.** We decided on the one-stream coding-agent decode beforehand: 16 had
+to be equal or better there, and no more than about 5% worse at two and three streams.
+
+- At one stream, 16 tied at 30k tokens (221 against 220) and lost 14% at 60k and 12% at 120k
+  (medians of eight runs each).
+- At two and three streams the difference ran from −7% to +8% across sizes, within the noise of
+  four to six runs.
+- bench2 rises 10% with 16, but only because code, math and JSON get 15–33% faster. Prose and chat
+  get 13–18% slower.
+- So production keeps 8. This repeats what we saw with blocks of 12 and 16 on the AWQ build.
+
+**Cutover.** We moved all traffic with:
+
+```bash
+gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8=100
+```
+
+Then we removed the `ownq8` and `ownq16` tags. A Cloud Run revision without traffic and without a
+tag keeps no instance, whatever its `minScale`, so the AWQ and 16-token revisions released their
+GPUs. The logs show `SIGTERM` within seconds of the change:
+
+- 16-token revision: tag removed at 17:31 UTC, `SIGTERM` at 17:32:00.
+- AWQ revision: `SIGTERM` at 17:43:15, three seconds after the traffic change, with no request in flight.
+
+The AWQ revision `qwen38-exp-e-full-arh-m1` stays on the service as the rollback target:
+
+```bash
+gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-full-arh-m1=100
+```
+
+It has no warm instance, so a rollback waits through a cold start of about 14 minutes. During that
+time Cloud Run keeps serving from the current revision until the AWQ instance is ready.
+
+What we learned from the rollout:
+
+- Tagging two new GPU revisions in a single `services replace` made the route wait for both. When
+  its deadline passed, the first revision lost its instance and needed a second cold start.
+- Add tagged GPU revisions one at a time.
+
+## AWQ build, 2026-10-23 (previous production)
+
+From 2026-10-23 to 2026-10-24, production served the AWQ-INT4 build (`quant/`, described in
+[Checkpoint](#checkpoint-awq-build-production-until-2026-10-24)) from revision
+`qwen38-exp-e-full-arh-m1`, which stays on the service as the rollback target. This was the headline
+table of this README while it served:
+
+| | |
+| --- | --- |
+| Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
+| Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
+| Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
+| Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with six patches in `docker/`, FlashInfer attention and GDN prefill kernels |
+| GPU | one whole NVIDIA RTX PRO 6000 Blackwell (96 GB, SM120) on Cloud Run, with 20 vCPU and 80 GiB |
+| Slots | 16 concurrent requests, fp32 recurrent state |
+| Context | **262,144** tokens per request; one 1,011,164-token FP8 KV pool shared by the 16 slots |
+| Decode, greedy, thinking off | **231.7 tok/s** (prose 145.3, chat 164.2, translation 166.2, summary 187.7, code 320.1, math 296.0, JSON 342.5) |
+| Decode, greedy, thinking off, concurrent streams | 197.7 tok/s each and **562.5** in total at four streams, 170.8 each and **863.3** in total at eight, about 962 in total at 16 |
+| Decode, sampled, thinking on, coding agent | 209 tok/s at 30k tokens of code context, 219 at 60k, 192 at 120k |
+| Prefill | 5,417 tok/s at 9k tokens, 4,958 at 31k, 3,570 at 124k |
+| Time to first token, coding agent | 5.5 s at 30k, 12.8 s at 60k, 32.5 s at 120k; a follow-up turn 0.34 s at 30k and 0.46 s at 60k |
+| Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
+| Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at 16 concurrent streams; greedy text byte-identical to the four-slot flags on the same card on 24 of 24 and 14 of 14 prompts |
+| Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
+| Tool calls | arguments stream as they are generated, at most 0.1 s apart; earlier thinking reaches the template natively, so each tool round hits the prefix cache |
+| Structured output | not supported: `response_format` and `tool_choice: "required"` return 400 |
+| Disconnects | a client that disconnects frees its slot within a second |
+| Cold start | 13 min 24 s from instance start to ready; one instance stays warm |
+
+We measure decode with `scripts/bench2.py`, which streams each answer and divides the tokens after
+the first by the time from the first to the last token. Each of seven workloads runs two prompts of
+up to 800 tokens, greedy with thinking off unless stated. Sampled decode comes from
+`scripts/accept.py`, fourteen prompts with thinking on, averaged over three runs, and
+`scripts/bench3.py` sends the same fourteen prompts over 1, 2, 4 or 8 connections at once. Its
+per-stream figure is the bench2 rate, and its total is every completion token over the wall time of
+the round, so prefill and queueing count. Prefill is the time to first token on prompts of unique
+random words, so that no prefix is cached. The coding-agent figures come from a separate benchmark
+that streams `/v1/messages` with three tools, thinking on at the default effort of the template and
+the default sampling of the model, over 29k, 59k and 119k tokens of SGLang source; a follow-up turn
+is one more user message after the answer.
+
+Production has served from a whole card since 2026-10-23, revision `qwen38-exp-e-full-arh-m1`. The
+greedy decode, concurrency, prefill and quality figures above were measured that day on a test
+service with the flags of production and the image before the reasoning-history patch, which
+changes only how `/v1/messages` renders earlier thinking; bench2 and bench3 use chat completions.
+They are medians of three runs. The coding-agent figures come from a second set of test services the
+same night, and the follow-up time to first token was measured with the patch. Refusals, vision,
+the 0.1 s tool-call streaming figure and disconnects were measured on the half card; refusals
+depend only on the weights. Unless a section says otherwise, the sections
+from [Checkpoint](#checkpoint-awq-build-production-until-2026-10-24) to [Vision](#vision) report measurements on the half card that
+production used until 2026-10-23, and [Half card, 2026-10-23](#half-card-2026-10-23) keeps its
+headline figures.
+
 
 ## Full card, 2026-10-23
 
@@ -773,7 +1076,10 @@ which established the flags and the memory budget for the full card. DFlash 2 is
 [z-lab/dflash](https://github.com/z-lab/dflash), with the drafter
 [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2). The weights are
 [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated),
-quantized with the recipe and calibration set of
+quantized for production since 2026-10-24 with
+[NVIDIA ModelOpt](https://github.com/NVIDIA/TensorRT-Model-Optimizer) (`quant/modelopt/`, the precision
+layout of the edp1096 mixed checkpoint with our own calibration and scale search), and before that
+with the recipe and calibration set of
 [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) through
 [llm-compressor](https://github.com/vllm-project/llm-compressor).
 [Discussion #192](https://huggingface.co/Qwen/Qwen3.8-27B/discussions/192) compares the published

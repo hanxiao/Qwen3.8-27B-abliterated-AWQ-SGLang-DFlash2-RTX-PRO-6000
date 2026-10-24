@@ -1,0 +1,73 @@
+# Own ModelOpt mixed NVFP4/FP8 quantization (mo.py through job.sh) on one whole RTX PRO 6000.
+# A service rather than a job: Cloud Run caps GPU jobs at one hour. It runs the VARIANTS below one
+# after another on one BF16 download, then polls /gcs/ownq/queue/$K_SERVICE/*.v (one variant line per
+# file) so more variants reuse the local BF16 copy. Delete it when the output is in the bucket.
+#
+# Bucket layout (BUCKET): pf/bf16/ holds huihui-ai/Huihui-Qwen3.8-27B-abliterated in BF16;
+# ownq/job/ holds mo.py, gcsul.py, job.sh, the calibration parquet (build_calib.py) and the KL
+# documents (FIDC: a JSON list of {"kind", "text"}; ours are private and not in this repository);
+# gcsdl.py (cloudrun/) sits at the root. mo.py uploads each variant to ownq/<NAME>/.
+#
+# The production checkpoint is NAME=molh: ALGO=local_hessian, HEAD=nvfp4, KV=fp8, NCAL=583, SEQ=4096.
+# Then w4a16head.py (serve the NVFP4 lm_head as W4A16_NVFP4) and, for a BF16 KV cache, stripkv.py,
+# both config-only edits, give ownq/molh-w4h-bkv.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: qwen38-ownquant
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: internal
+    run.googleapis.com/launch-stage: ALPHA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '1'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
+      timeoutSeconds: 300
+      containers:
+      # Any CUDA 13 image with Python 3.12 works; job.sh builds its own venv (torch, transformers 5,
+      # nvidia-modelopt 0.47.0). We used the serving image of cloudrun/service.yaml.
+      - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched6-arh
+        command: [bash, -c]
+        args:
+        - "python3 -m http.server 8080 >/dev/null 2>&1 & bash /gcs/ownq/job/job.sh; echo EXIT $?; sleep infinity"
+        env:
+        - name: BUCKET
+          value: BUCKET
+        - name: VARIANTS
+          value: 'NAME=molh ALGO=local_hessian HEAD=nvfp4 BH=0 SENS=0 EXPORT=1 NCAL=583 SEQ=4096 KV=fp8'
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: HF_TOKEN
+              key: latest
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: '30'
+            memory: 120Gi
+            nvidia.com/gpu: '1'
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 30
+        volumeMounts:
+        - name: gcs
+          mountPath: /gcs
+      volumes:
+      - name: gcs
+        csi:
+          driver: gcsfuse.run.googleapis.com
+          volumeAttributes:
+            bucketName: BUCKET
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-rtx-pro-6000

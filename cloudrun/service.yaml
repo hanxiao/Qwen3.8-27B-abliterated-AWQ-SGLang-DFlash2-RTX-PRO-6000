@@ -1,6 +1,11 @@
-# Qwen3.8-27B, abliterated (huihui-ai) and quantized to AWQ-INT4 with cyankiwi's recipe
-# (quant/), on one whole NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
-# Production since 2026-10-23: service qwen38-exp-e, revision qwen38-exp-e-full-arh-m1.
+# Qwen3.8-27B, abliterated (huihui-ai), in our own mixed NVFP4/FP8 quantization (ModelOpt 0.47,
+# quant/modelopt/: FP8 attention and GDN projections, NVFP4 MLPs, NVFP4 lm_head served W4A16), on
+# one whole NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
+# Production since 2026-10-24: service qwen38-exp-e, revision qwen38-exp-e-ownq8.
+# From 2026-10-23 to 2026-10-24 production served the AWQ-INT4 build (quant/) from revision
+# qwen38-exp-e-full-arh-m1, which stays on the service as the rollback target. Its differences from
+# this file: huihui-awq/out=/tmp/model, --kv-cache-dtype=fp8_e4m3, no --fp4-gemm-backend, and
+# SGLANG_DFLASH_DRAFT_HEAD=int8 with SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2.
 # Applied with `gcloud alpha run services replace`.
 #
 # `services replace` is used rather than `run deploy --args=...` because that flag splits on
@@ -92,6 +97,17 @@ spec:
           # At 0.79 the half-card revision had 5.49 GB left. On the whole card with 16 slots, 13.16
           # GB are left after startup and the pool is 1,011,164 tokens (max_req_input_len 262,138).
           #
+          # --kv-cache-dtype=bf16 since 2026-10-24. FP8 KV would double the pool (492,440 -> about
+          # 985k tokens), but on this checkpoint it costs 8-19% of prefill at 31k-124k tokens, about 5%
+          # of decode and KL +0.0015. The pool still holds the full 262k context for one request and
+          # about four 115k-token agent runs at once. The checkpoint in ownq/molh-w4h-bkv has its FP8
+          # KV-scale fields removed (quant/modelopt/stripkv.py): a ModelOpt checkpoint that keeps them
+          # produces garbage with a BF16 KV cache. For fp8_e4m3 serve ownq/molh-w4h instead.
+          #
+          # --fp4-gemm-backend=flashinfer_cutedsl: NVFP4 GEMM for the MLPs. The FP8 attention/GDN
+          # projections and the W4A16 (Marlin) lm_head need no flag. Prefill is 2.2x the AWQ build at
+          # 9k-31k tokens because these multiply on FP4/FP8 tensor cores instead of BF16.
+          #
           # --max-mamba-cache-size counts recurrent-state slots, five per running request on this
           # model (three base, two for prefix-cache tracking); sglang#43204 kills the engine when
           # every slot is taken and locked. 82 = 5 x 16 requests + 2 spare. The state stays fp32
@@ -137,7 +153,7 @@ spec:
           args:
             - >-
               pip install -q 'google-cloud-storage==3.17.1' &&
-              python3 /gcs/gcsdl.py BUCKET huihui-awq/out=/tmp/model dflash2=/tmp/dflash2 &&
+              python3 /gcs/gcsdl.py BUCKET ownq/molh-w4h-bkv=/tmp/model dflash2=/tmp/dflash2 &&
               exec python3 -m sglang.launch_server
               --model-path=/tmp/model
               --served-model-name=Qwen3.8-27B-abliterated-AWQ-INT4
@@ -146,7 +162,8 @@ spec:
               --port=8080
               --mem-fraction-static=0.79
               --context-length=262144
-              --kv-cache-dtype=fp8_e4m3
+              --kv-cache-dtype=bf16
+              --fp4-gemm-backend=flashinfer_cutedsl
               --attention-backend=flashinfer
               --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=8192
@@ -173,18 +190,12 @@ spec:
               --enable-http2
               --api-key "$SGLANG_API_KEY"
           env:
-            # DFlash scores its draft candidates with an int8 copy of lm_head (docker/dflash_qhead.py)
-            # instead of reading the 2.54 GB BF16 head a second time each step; verification keeps
-            # the BF16 head. Decode +6%; 1.27 GB, taken from the memory left after the pools.
-            - name: SGLANG_DFLASH_DRAFT_HEAD
-              value: int8
-            # Tile of the int8 draft-head kernel (BN, BK, warps, stages). Above 32 draft rows per
-            # verify batch (slots x block) the kernel tiles BM=64, and on the half card the default
-            # 128,256,8,3 then needed 131,072 B of shared memory against the MIG partition's
-            # 101,376: Triton OutOfResources at startup. 128,128,8,2 fits in 98,304 B. This
-            # revision has up to 16 x 8 = 128 rows; the default tile was not tried on the whole card.
-            - name: SGLANG_DFLASH_DRAFT_HEAD_CFG
-              value: '128,128,8,2'
+            # No SGLANG_DFLASH_DRAFT_HEAD / SGLANG_DFLASH_DRAFT_HEAD_CFG since 2026-10-24: the int8
+            # draft head (docker/dflash_qhead.py) only works with a BF16 lm_head, and this
+            # checkpoint's head is NVFP4 (served W4A16), which the drafter already reads at 0.64 GB
+            # per step instead of 2.54. The AWQ revision set SGLANG_DFLASH_DRAFT_HEAD=int8 and
+            # SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2 (the int8 kernel tile that fits the half
+            # card's shared memory at more than 32 draft rows).
             - name: SGLANG_API_KEY
               valueFrom:
                 secretKeyRef:
