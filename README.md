@@ -14,8 +14,8 @@ the previous production.
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.51 GB), 8 draft tokens per block |
 | Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with six patches in `docker/`, FlashInfer attention and GDN prefill kernels, FlashInfer CuTe-DSL NVFP4 GEMM |
 | GPU | one whole NVIDIA RTX PRO 6000 Blackwell (96 GB, SM120) on Cloud Run, with 20 vCPU and 80 GiB |
-| Slots | 16 concurrent requests, fp32 recurrent state |
-| Context | **262,144** tokens per request; one 492,440-token BF16 KV pool shared by the 16 slots |
+| Slots | 8 concurrent requests, fp32 recurrent state (16 until the afternoon of 2026-10-24, see [Eight slots](#eight-slots-2026-10-24)) |
+| Context | **262,144** tokens per request; one 566,383-token BF16 KV pool shared by the 8 slots (492,440 with 16) |
 | Prefill | **12,003 tok/s** at 9k tokens, 11,223 at 31k, 6,728 at 124k, which is 2.2, 2.2 and 1.9 times the AWQ build |
 | Time to first token, coding agent | **2.5 s** at 30k tokens of code context, 6.2 s at 60k, 17.2 s at 120k; a follow-up turn 0.39 s at 30k, 0.70 s at 60k, 1.01 s at 120k |
 | Decode, greedy, thinking off | **235.4 tok/s** (prose 153.9, chat 176.1, translation 153.7, summary 198.4, code 320.4, math 313.5, JSON 332.0) |
@@ -380,6 +380,11 @@ why production now runs a BF16 KV cache.
 
 ## Concurrency
 
+Production has served 8 slots since 2026-10-24 (see [Eight slots, 2026-10-24](#eight-slots-2026-10-24)),
+with `--max-mamba-cache-size 42` = 5 × 8 + 2, `--cuda-graph-max-bs-decode 8` and
+`containerConcurrency: 16`. The rest of this section describes the 16-slot configuration that ran
+before it, from 2026-10-23 to 2026-10-24.
+
 Every running request holds its own recurrent states, which share memory with the KV pool. With
 ReplaySSM a request needs five fp32 recurrent states, three of its own and two for prefix-cache
 tracking. `--max-mamba-cache-size` counts these states and must be at least five times
@@ -466,13 +471,17 @@ keeps interval 40 with 8,192-token chunks on the whole card; we did not repeat t
 
 ## Memory
 
-The production revision since 2026-10-24 serves the mixed checkpoint with a BF16 KV cache. On it,
-`/get_server_info` reports:
+The production revision since 2026-10-24 serves the mixed checkpoint with a BF16 KV cache and 8
+slots. On it, `/get_server_info` reports:
 
 - 20.18 GB of target weights;
-- a 30.06 GB target KV pool of 492,440 tokens;
-- 12.90 GB free after startup;
+- a 34.57 GB target KV pool of 566,383 tokens;
+- 14.72 GB free after startup;
 - `max_req_input_len` 262,138, so a single request still gets the full context.
+
+With 16 slots (revision `qwen38-exp-e-ownq8`) the pool was 30.06 GB and 492,440 tokens, with
+12.90 GB free after startup. Fewer slots need fewer recurrent states and smaller CUDA graphs, and
+the pool takes the difference.
 
 A BF16 token takes twice the bytes of an FP8 one, so the pool holds about half the tokens. Agent
 runs here reach 115k tokens of context at the median, so the pool holds about four such runs at
@@ -653,8 +662,8 @@ with a BF16 KV cache, as its output is then garbage. `quant/modelopt/stripkv.py`
 which the `hermes` parser drops. `--speculative-draft-attention-backend flashinfer` gives the
 drafter the attention kernels of the target. `--enable-cache-report` reports cache hits to clients,
 as `cache_read_input_tokens` on `/v1/messages` and `prompt_tokens_details` on chat completions.
-`--cuda-graph-max-bs-decode 16` captures the decode and verify graphs for batch sizes 1 to 16, one
-per slot count. `--chunked-prefill-size 8192` and `--max-prefill-tokens 8192` set the prefill chunk,
+`--cuda-graph-max-bs-decode 8` captures the decode and verify graphs for batch sizes 1 to 8, one
+per slot count (16 with 16 slots until 2026-10-24). `--chunked-prefill-size 8192` and `--max-prefill-tokens 8192` set the prefill chunk,
 the largest the FlashInfer GDN kernel takes; 16,384-token chunks with the Triton GDN kernel did not
 shorten the time to first token. The two `SGLANG_DFLASH_DRAFT_HEAD*` variables below belong to the
 AWQ build, whose head is BF16. The mixed checkpoint has a quantized head, and the int8 draft head
@@ -675,15 +684,17 @@ DSpark recipe do not apply to it.
 `cloudrun/service.yaml` is the deployed configuration. Cloud Run requires the container to listen on
 8080 and `gpu-zonal-redundancy-disabled: 'true'` for the deployment to complete. With `minScale:
 '1'` and `maxScale: '1'`, one instance stays warm, and a cold start occurs only when a revision is
-replaced. `containerConcurrency: 32` admits two requests per slot, so that the excess queues inside
-SGLang and Cloud Run returns 429 only beyond 32. `timeoutSeconds: 3600`, the maximum, lets an
+replaced. `containerConcurrency: 16` admits two requests per slot, so that the excess queues inside
+SGLang and Cloud Run returns 429 only beyond 16 (32 with 16 slots until 2026-10-24). `timeoutSeconds: 3600`, the maximum, lets an
 agent turn that writes a long file in one tool call run for up to an hour. The service declares the
 `ALPHA` launch stage, without which Cloud Run refused the 64 GiB memory limit of the half card; we
 kept it for the 80 GiB limit of the whole card and did not try without it.
 
 The production service is `qwen38-exp-e` in us-central1. Since 2026-10-24 all its traffic goes to
-the revision that serves the mixed checkpoint, which `cloudrun/service.yaml` describes (see
-[Production, 2026-10-24](#production-2026-10-24)). Its image, flags and Cloud Run settings are those
+`qwen38-exp-e-ownq8-c8`, the revision that serves the mixed checkpoint with 8 slots, which
+`cloudrun/service.yaml` describes (see [Production, 2026-10-24](#production-2026-10-24) and
+[Eight slots, 2026-10-24](#eight-slots-2026-10-24)). `qwen38-exp-e-ownq8`, the same with 16 slots,
+stays on the service as the first rollback target. Its image, flags and Cloud Run settings are those
 of the previous revision, with these differences:
 
 - the weights are `ownq/molh-w4h-bkv/` instead of `huihui-awq/out/`;
@@ -845,6 +856,45 @@ What we learned from the rollout:
 - Tagging two new GPU revisions in a single `services replace` made the route wait for both. When
   its deadline passed, the first revision lost its instance and needed a second cold start.
 - Add tagged GPU revisions one at a time.
+
+### Eight slots, 2026-10-24
+
+Later on 2026-10-24 Han chose 8 concurrent requests for production instead of 16. The new revision
+`qwen38-exp-e-ownq8-c8` has the flags of `qwen38-exp-e-ownq8` with these differences only:
+
+- `--max-running-requests 8` instead of 16;
+- `--max-mamba-cache-size 42` (5 × 8 + 2) instead of 82;
+- `--cuda-graph-max-bs-decode 8` instead of 16;
+- `containerConcurrency: 16` instead of 32.
+
+It was added with 0% traffic and the tag `con8`; it was ready after a cold start of 13 min 5 s. On
+the tag URL:
+
+| | 16 slots (`ownq8`) | **8 slots (`ownq8-c8`, deployed)** |
+| --- | ---: | ---: |
+| `/v1/loads` `max_running_requests` | 16 | 8 |
+| KV pool, BF16 | 492,440 tokens, 30.06 GB | **566,383 tokens, 34.57 GB** |
+| Free after startup | 12.90 GB | 14.72 GB |
+| Needle 30k / 120k, math | 5/5, 5/5, 12/12 | 5/5 + 5/5, 5/5, 12/12 |
+| Parallel tool calls, `/v1/messages` (non-streaming + streaming) | 8/8 + 8/8 | 8/8 + 8/8 |
+| `toolstream.py`, 1,500 integers: longest silence, call | 0.1 s, 15.5 s | 0.1 s, 15.6 s |
+| `/v1/messages` with thinking | – | pass |
+| Coding agent, one stream at 30k, decode | 220 (n8) | 211 (n2: 220.1, 202.6) |
+| Coding agent, time to first token at 30k / follow-up | 2.5 / 0.39 s | 2.55 / 0.54 s |
+
+The one-stream decode is within the ±10% per-request noise of the coding-agent benchmark. We then
+moved all traffic and removed the tag in one command:
+
+```bash
+gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8-c8=100 --remove-tags con8
+```
+
+The 16-slot revision got `SIGTERM` at 21:46:10 UTC, six seconds later, with no request in flight. It
+stays on the service as the rollback target:
+
+```bash
+gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8=100
+```
 
 ## AWQ build, 2026-10-23 (previous production)
 

@@ -1,7 +1,11 @@
 # Qwen3.8-27B, abliterated (huihui-ai), in our own mixed NVFP4/FP8 quantization (ModelOpt 0.47,
 # quant/modelopt/: FP8 attention and GDN projections, NVFP4 MLPs, NVFP4 lm_head served W4A16), on
 # one whole NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
-# Production since 2026-10-24: service qwen38-exp-e, revision qwen38-exp-e-ownq8.
+# Production since 2026-10-24: service qwen38-exp-e, revision qwen38-exp-e-ownq8-c8, eight slots
+# (Han's choice of 8 concurrent requests, 2026-10-24). Earlier that day revision
+# qwen38-exp-e-ownq8 served the same flags with 16 slots (--max-running-requests=16,
+# --max-mamba-cache-size=82, --cuda-graph-max-bs-decode=16, containerConcurrency 32); it stays on
+# the service as the rollback target.
 # From 2026-10-23 to 2026-10-24 production served the AWQ-INT4 build (quant/) from revision
 # qwen38-exp-e-full-arh-m1, which stays on the service as the rollback target. Its differences from
 # this file: huihui-awq/out=/tmp/model, --kv-cache-dtype=fp8_e4m3, no --fp4-gemm-backend, and
@@ -42,9 +46,9 @@ spec:
         # Mandatory in this preview; without it the deploy hangs or fails on quota.
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
-      # Two requests per slot, as before (16 slots): requests 17 to 32 queue inside SGLang, where
-      # the prefix cache and the admission order live, and Cloud Run returns 429 only beyond 32.
-      containerConcurrency: 32
+      # Two requests per slot, as before (8 slots): requests 9 to 16 queue inside SGLang, where
+      # the prefix cache and the admission order live, and Cloud Run returns 429 only beyond 16.
+      containerConcurrency: 16
       # Cloud Run's maximum. A request is one model turn, and an agent turn that writes a long
       # file in one tool call runs for many minutes; at 600 Cloud Run cut such turns off.
       timeoutSeconds: 3600
@@ -110,12 +114,13 @@ spec:
           #
           # --max-mamba-cache-size counts recurrent-state slots, five per running request on this
           # model (three base, two for prefix-cache tracking); sglang#43204 kills the engine when
-          # every slot is taken and locked. 82 = 5 x 16 requests + 2 spare. The state stays fp32
+          # every slot is taken and locked. 42 = 5 x 8 requests + 2 spare (82 = 5 x 16 + 2 with
+          # 16 slots until 2026-10-24). The state stays fp32
           # (ReplaySSM sets it): greedy output of 16 slots is byte-identical to four slots on the
           # same card on 24/24 drift.py and 14/14 bench3 prompts. On the half card, bfloat16 state
           # would have fit eight slots but changed greedy text (41/104 identical); see the README.
           #
-          # --cuda-graph-max-bs-decode=16 captures decode and verify graphs for batch sizes 1-16,
+          # --cuda-graph-max-bs-decode=8 captures decode and verify graphs for batch sizes 1-8,
           # one per slot count.
           #
           # --chunked-prefill-size=8192 and --max-prefill-tokens=8192: the largest chunk the
@@ -168,15 +173,15 @@ spec:
               --linear-attn-prefill-backend=flashinfer
               --chunked-prefill-size=8192
               --max-prefill-tokens=8192
-              --max-running-requests=16
+              --max-running-requests=8
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=82
-              --cuda-graph-max-bs-decode=16
+              --max-mamba-cache-size=42
+              --cuda-graph-max-bs-decode=8
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
