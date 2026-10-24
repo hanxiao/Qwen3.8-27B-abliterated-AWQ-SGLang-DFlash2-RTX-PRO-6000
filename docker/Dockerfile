@@ -14,7 +14,7 @@
 # tests. The last step prints the patched files' hashes, to match a build against a tested image.
 FROM lmsysorg/sglang:v0.5.22
 COPY qwen3_coder_detector.py test_stream.py replayssm_dflash.py draft_prob_round.py sched_admission.py \
-     dflash_qhead.py draft_head_quant.py /tmp/patch/
+     dflash_qhead.py draft_head_quant.py anthropic_reasoning_history.py /tmp/patch/
 RUN set -e; \
     T="$(python3 -c 'import sglang.srt.function_call.qwen3_coder_detector as m; print(m.__file__)')"; \
     S="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).parents[2])')"; \
@@ -29,6 +29,7 @@ RUN set -e; \
     python3 /tmp/patch/draft_prob_round.py; \
     python3 /tmp/patch/sched_admission.py; \
     python3 /tmp/patch/draft_head_quant.py; \
+    python3 /tmp/patch/anthropic_reasoning_history.py; \
     rm -rf /tmp/patch; \
     P="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).parent)')"; \
     cd "$P" && sha256sum srt/function_call/qwen3_coder_detector.py \

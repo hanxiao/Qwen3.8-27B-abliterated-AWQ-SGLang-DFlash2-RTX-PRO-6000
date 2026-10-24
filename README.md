@@ -560,6 +560,23 @@ measurement, and eight slots were never deployed. The measured total at eight st
 tok/s for the eight-slot option and 360.3 for the deployed four slots.
 [`REPORT-2026-10-23.md`](REPORT-2026-10-23.md) lists every run of the study.
 
+## Full card, 2026-10-23
+
+Production moved to a whole RTX PRO 6000 (`nvidia.com/gpu: 1`, 20 vCPU, 80 GiB) with 16 slots,
+`--max-mamba-cache-size 82`, `--cuda-graph-max-bs-decode 16` and 8,192-token prefill chunks; block 8,
+the int8 draft head and block verification stay. Single-stream bench2 decode is 231.7 tok/s (140.5 on
+the half card), prefill 5,386 tok/s at 9k tokens, 863 tok/s in total at eight streams. Greedy text is
+identical to the four-slot flags on the full card. On thinking-on coding over real 30k/60k/120k-token
+code contexts, one stream decodes at 209/219/192 tok/s; blocks 12 and 16, four slots, no block
+verification and 16,384-token chunks were all within noise or slower.
+
+`docker/anthropic_reasoning_history.py` passes earlier thinking on `/v1/messages` to the chat
+template as `reasoning_content`. Stock v0.5.22 splices it into the visible content as `<think>` text
+for Jinja templates, so the re-rendered history differs from the generated tokens and every agent
+turn re-prefills the previous answer. With the patch, follow-up turns at 30k and 60k tokens reach
+their first token in 0.34 and 0.46 s instead of 1.05 and 1.34 s.
+`SGLANG_ANTHROPIC_NATIVE_REASONING_HISTORY=0` restores the stock behaviour.
+
 ## Reproduction
 
 Each script takes the service URL and reads the API key from `SGLANG_API_KEY`:

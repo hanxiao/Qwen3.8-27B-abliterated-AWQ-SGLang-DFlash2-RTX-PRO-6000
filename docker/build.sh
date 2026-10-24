@@ -11,13 +11,13 @@ set -euo pipefail
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 REPO="${REPO:-sglang}"
-TAG="${TAG:-qwen38-sglang:v0.5.22-patched5}"
+TAG="${TAG:-qwen38-sglang:v0.5.22-patched6-arh}"
 
 here="$(cd "$(dirname "$0")" && pwd)"
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
 cp "$here/Dockerfile" "$here/qwen3_coder_detector.py" "$here/test_stream.py" \
    "$here/replayssm_dflash.py" "$here/draft_prob_round.py" "$here/sched_admission.py" \
-   "$here/dflash_qhead.py" "$here/draft_head_quant.py" "$stage/"
+   "$here/dflash_qhead.py" "$here/draft_head_quant.py" "$here/anthropic_reasoning_history.py" "$stage/"
 
 gcloud artifacts repositories create "$REPO" --repository-format=docker \
   --location="$REGION" --project="$PROJECT" 2>/dev/null || true
