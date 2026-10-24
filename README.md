@@ -1,26 +1,26 @@
-# Qwen3.8-27B abliterated · AWQ-INT4 · SGLang + DFlash 2 · ½ NVIDIA RTX PRO 6000
+# Qwen3.8-27B abliterated · AWQ-INT4 · SGLang + DFlash 2 · NVIDIA RTX PRO 6000
 
 | | |
 | --- | --- |
 | Model | [`huihui-ai/Huihui-Qwen3.8-27B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated), quantized here with the AWQ-INT4 recipe of [`cyankiwi/Qwen3.8-27B-AWQ-INT4`](https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4) (`quant/`), served as `Qwen3.8-27B-abliterated-AWQ-INT4` |
 | Weights | INT4 W4A16 (AWQ, group 32, asymmetric) with a dense BF16 `lm_head`, 19.12 GiB resident |
 | Drafter | [DFlash 2](https://inco.ai/blog/dflash2/) [`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2), quantized to FP8 at load (2.53 GiB), blocks of 8 tokens |
-| Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with five patches in `docker/`, FlashInfer attention and GDN prefill kernels |
-| GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120) on Cloud Run |
-| Slots | 4 concurrent requests, fp32 recurrent state |
-| Context | **262,144** tokens per request; one 266,083-token FP8 KV pool shared by the four slots |
-| Decode, greedy, thinking off | **140.5 tok/s** (prose 89.2, chat 98.1, translation 99.3, summary 118.0, code 193.4, math 180.8, JSON 204.6) |
-| Decode, greedy, thinking off, four streams | 120.7 tok/s each, **348.3 tok/s** in total; 217.4 with the former two slots |
-| Decode, sampled, thinking on | 126.2 tok/s, 3.60 tokens per verification |
-| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
-| Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
+| Engine | SGLang v0.5.22 (`lmsysorg/sglang:v0.5.22`) with six patches in `docker/`, FlashInfer attention and GDN prefill kernels |
+| GPU | one whole NVIDIA RTX PRO 6000 Blackwell (96 GB, SM120) on Cloud Run, with 20 vCPU and 80 GiB |
+| Slots | 16 concurrent requests, fp32 recurrent state |
+| Context | **262,144** tokens per request; one 1,011,164-token FP8 KV pool shared by the 16 slots |
+| Decode, greedy, thinking off | **231.7 tok/s** (prose 145.3, chat 164.2, translation 166.2, summary 187.7, code 320.1, math 296.0, JSON 342.5) |
+| Decode, greedy, thinking off, concurrent streams | 197.7 tok/s each and **562.5** in total at four streams, 170.8 each and **863.3** in total at eight, about 962 in total at 16 |
+| Decode, sampled, thinking on, coding agent | 209 tok/s at 30k tokens of code context, 219 at 60k, 192 at 120k |
+| Prefill | 5,417 tok/s at 9k tokens, 4,958 at 31k, 3,570 at 124k |
+| Time to first token, coding agent | 5.5 s at 30k, 12.8 s at 60k, 32.5 s at 120k; a follow-up turn 0.34 s at 30k and 0.46 s at 60k |
 | Refusals | 0 of 6 borderline prompts; the stock model refuses 5 |
-| Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at four concurrent streams; greedy text byte-identical to the two-slot configuration on 104 of 104 prompts |
+| Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at 16 concurrent streams; greedy text byte-identical to the four-slot flags on the same card on 24 of 24 and 14 of 14 prompts |
 | Vision | native, preprocessed on the GPU, at most 1,024 tokens per image |
-| Tool calls | arguments stream as they are generated, at most 0.1 s apart |
+| Tool calls | arguments stream as they are generated, at most 0.1 s apart; earlier thinking reaches the template natively, so each tool round hits the prefix cache |
 | Structured output | not supported: `response_format` and `tool_choice: "required"` return 400 |
 | Disconnects | a client that disconnects frees its slot within a second |
-| Cold start | 14 min; one instance stays warm |
+| Cold start | 13 min 24 s from instance start to ready; one instance stays warm |
 
 We measure decode with `scripts/bench2.py`, which streams each answer and divides the tokens after
 the first by the time from the first to the last token. Each of seven workloads runs two prompts of
@@ -29,22 +29,33 @@ up to 800 tokens, greedy with thinking off unless stated. Sampled decode comes f
 `scripts/bench3.py` sends the same fourteen prompts over 1, 2, 4 or 8 connections at once. Its
 per-stream figure is the bench2 rate, and its total is every completion token over the wall time of
 the round, so prefill and queueing count. Prefill is the time to first token on prompts of unique
-random words, so that no prefix is cached.
+random words, so that no prefix is cached. The coding-agent figures come from a separate benchmark
+that streams `/v1/messages` with three tools, thinking on at the default effort of the template and
+the default sampling of the model, over 29k, 59k and 119k tokens of SGLang source; a follow-up turn
+is one more user message after the answer.
 
-The single-stream decode above was measured on the production revision on 2026-10-23. The
-four-stream, sampled and quality figures come from a test service with the same image, weights and
-flags at `--mem-fraction-static 0.80` (production runs 0.79, which changes the pool size and the free memory, not the computation), as
-medians of five runs; see [the tuning study](#tuning-study-2026-10-23). Long-context decode,
-prefill, refusals and the tables in the sections on the checkpoint and speculative decoding were
-measured on the earlier two-slot configuration and not repeated at four slots.
+Production has served from a whole card since 2026-10-23, revision `qwen38-exp-e-full-arh-m1`. The
+greedy decode, concurrency, prefill and quality figures above were measured that day on a test
+service with the flags of production and the image before the reasoning-history patch, which
+changes only how `/v1/messages` renders earlier thinking; bench2 and bench3 use chat completions.
+They are medians of three runs. The coding-agent figures come from a second set of test services the
+same night, and the follow-up time to first token was measured with the patch. Refusals, vision,
+the 0.1 s tool-call streaming figure and disconnects were measured on the half card; refusals
+depend only on the weights. Unless a section says otherwise, the sections
+from [Checkpoint](#checkpoint) to [Vision](#vision) report measurements on the half card that
+production used until 2026-10-23, and [Half card, 2026-10-23](#half-card-2026-10-23) keeps its
+headline figures.
 
 ```bash
-bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + five patches, into Artifact Registry
+bash docker/build.sh                                  # lmsysorg/sglang:v0.5.22 + six patches, into Artifact Registry
 gcloud alpha run services replace quant/service.yaml  # once: quantize into the bucket (~75 min)
 gcloud alpha run services replace cloudrun/service.yaml
 ```
 
 ## GPU
+
+Production runs on one whole RTX PRO 6000 (`nvidia.com/gpu: 1`) with 20 vCPU and 80 GiB of system
+memory. Until 2026-10-23 it ran on half a card, and most of the studies below were done there.
 
 The fractional RTX PRO 6000 is a Cloud Run offering, separate from the G4 machine types of Compute
 Engine and with its own quota: `run.googleapis.com` grants milliGPUs, of which a half card uses
@@ -56,10 +67,14 @@ The half card is a MIG `2g.48gb` partition with 94 of the 188 SMs. We measure 76
 bandwidth (1,524 GB/s on the whole card) and 177 dense BF16 TFLOPS (412). Decode is bound by
 bandwidth, since a step reads the weights of the target and the drafter once for all the tokens it
 verifies, so it becomes faster only by committing more tokens per step or by reading fewer bytes.
-Prefill is bound by compute and runs at about 145 TFLOP/s at 9k tokens, which is 82% of the BF16
-peak.
+Prefill is bound by compute and runs at about 145 TFLOP/s at 9k tokens on the half card, which is
+82% of the BF16 peak. The whole card has twice the bandwidth and the compute, and decodes one stream
+1.65 times as fast (231.7 against 140.5 tok/s in bench2) and prefills 9k tokens 1.9 times as fast
+(5,417 against 2,783 tok/s).
 
 ## Checkpoint
+
+The tables in this section were measured on the half card.
 
 We serve the abliterated Qwen3.8-27B of huihui-ai, in which the residual-stream direction that
 mediates refusals is projected out of the weights. Of six borderline prompts in
@@ -125,6 +140,11 @@ Run limits GPU jobs to one hour. Against the FP8 reference of the stock model, t
 perplexity 7.966 against 7.979. These numbers include both the abliteration and the quantization.
 
 ## Speculative decoding
+
+The DFlash measurements in this section were taken on the half card. On the whole card, blocks of
+12 and 16 tokens again lose to blocks of 8 (see [Full card, 2026-10-23](#full-card-2026-10-23)),
+and the int8 draft head is still worth about 4.5%: with eight slots, bench2 gives 230.4 tok/s with
+it and 221.5 without it and without block verification, which acts only on sampled requests.
 
 ### Drafter
 
@@ -231,29 +251,60 @@ selects the FlashInfer GDN prefill kernel, which SGLang selects by default only 
 NVFP4 checkpoint of this model, the kernel raises prefill at 9k and 31k tokens from 5,195 and 4,923
 tok/s to 5,900 and 5,180. With it, a turn served from the radix cache and the same turn computed
 from scratch produce identical greedy text. The kernel needs CUDA 13 and prefill chunks of at most
-8,192 tokens.
+8,192 tokens. The half card ran 4,096-token chunks; the whole card runs 8,192.
+
+AWQ W4A16 prefills on BF16 tensor cores. A separate study on the whole card on 2026-10-24, not
+deployed, served mixed checkpoints with an NVFP4 MLP and FP8 attention and GDN projections, which
+multiply on FP4 and FP8 tensor cores. The fastest prefilled at 11,970 tok/s at 9k tokens, 10,808 at
+31k and 6,741 at 124k, against 5,401, 5,105 and 3,563 for the production AWQ checkpoint in the same
+study, with KL 0.0606 to BF16 against 0.0346. Our own mixed NVFP4/FP8 quantization is work in
+progress.
 
 ## Concurrency
 
 Every running request holds its own recurrent states, which share memory with the KV pool. With
 ReplaySSM a request needs five fp32 recurrent states, three of its own and two for prefix-cache
 tracking. `--max-mamba-cache-size` counts these states and must be at least five times
-`--max-running-requests`. We serve four slots and set 22 = 5 × 4 + 2, keeping two in reserve, since
-the engine stops when every state is taken and locked (sglang#43204). The 22 states take 3.34 GiB.
-The pool itself is shared: one request can use all of it while the other slots are idle, and when
-long requests compete, SGLang delays one or evicts the cached prefix of another. Agent runs on this
-deployment reach 115k tokens of context at the median and 145k at the 90th percentile, so the pool
-holds a long run beside shorter requests while a single request keeps the full 262k context.
+`--max-running-requests`. We serve 16 slots and set 82 = 5 × 16 + 2, keeping two in reserve, since
+the engine stops when every state is taken and locked (sglang#43204). The pool itself is shared:
+one request can use all of it while the other slots are idle, and when long requests compete,
+SGLang delays one or evicts the cached prefix of another. Agent runs on this deployment reach 115k
+tokens of context at the median and 145k at the 90th percentile, so the 1,011,164-token pool holds
+several long runs at once while a single request keeps the full 262k context.
 
-We serve four slots because the clients of this deployment send at most four requests at once, and
+On the whole card the slot count no longer competes with the context: with the four-slot flags the
+pool has 1,232,992 tokens, with 16 slots 1,011,164. The state stays fp32, and 16 slots return the
+same greedy text as the four-slot flags on the same card on 24 of 24 `drift.py` prompts and on the
+14 of 14 one-stream answers of `bench3.py`. `containerConcurrency` is 32, two requests per slot, so
+that requests 17 to 32 queue inside SGLang and Cloud Run returns 429 only beyond 32. `bench3.py` on
+the whole card, medians of three runs on test services:
+
+| Streams | Four slots, per stream | Four slots, total | 16 slots, per stream | 16 slots, total |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 232.5 tok/s | 195.7 tok/s | 231.8 tok/s | 196.3 tok/s |
+| 2 | 221.6 | 348.5 | 221.6 | 349.0 |
+| 4 | 198.5 | 563.7 | 197.7 | 562.5 |
+| 8 | 197.9 (four run, four wait) | 573.1 | 170.8 | **863.3** |
+| 16 | | | about 84 | about 962 |
+
+The 16-stream row ran two eight-stream rounds of `bench3.py` at the same time, 28 requests in all,
+and is an estimate rather than a median of the standard round. Eight slots reach the same total at
+eight streams (863.1). On the coding-agent benchmark, four slots and 16 decode one stream at the
+same rate, within noise. All 64 `qcon.py` answers (described below) are right at 16 streams, none contains a word
+from the other requests, and 26 are byte-identical to the serial run.
+
+### Half card, four slots
+
+The rest of this section describes the half card, as measured on 2026-10-23. We served four slots
+there because the clients of this deployment send at most four requests at once, and
 because four slots fit with fp32 recurrent state and the full context. Eight slots with fp32 state
 leave a 203,338-token pool at `--mem-fraction-static 0.80`, below the 262,144-token
 context. Eight slots fit only with bfloat16 state, which changes greedy text (see
-[the tuning study](#tuning-study-2026-10-23)). With fp32 state the four-slot configuration returns
+[the tuning study](#tuning-study-half-card-2026-10-23)). With fp32 state the four-slot configuration returns
 the same greedy text as the two-slot one on 104 of 104 prompts, so the slot count, the batch-size-4
-CUDA graphs and the retiled draft head are bit-neutral at one stream. `containerConcurrency` is 8,
-two requests per slot as before, so that requests five to eight queue inside SGLang and Cloud Run
-returns 429 only beyond eight.
+CUDA graphs and the retiled draft head are bit-neutral at one stream. `containerConcurrency` was 8,
+two requests per slot as before, so that requests five to eight queued inside SGLang and Cloud Run
+returned 429 only beyond eight.
 
 The extra slots cost nothing at one or two streams and raise the total once more than two requests
 run. `scripts/bench3.py`,
@@ -280,10 +331,10 @@ across the two runs, because a verify batch of a different size rounds different
 four-slot configuration at four streams, all 64 answers are again right, none contains a word from
 the other requests, and 21 are byte-identical to the serial run.
 
-SGLang schedules a waiting prefill ahead of decode, so a long prompt that arrives while the other
+SGLang schedules a waiting prefill ahead of decode, so a long prompt that arrives while another
 slot is answering stalls that answer. `--prefill-decode-interval N` runs decode steps after each
 prefill chunk. The following table measures a 124k-token prompt that arrives beside a running
-answer:
+answer on the half card, with 4,096-token chunks:
 
 | | Long prompt, time to first token | Other stream, longest gap |
 | --- | ---: | ---: |
@@ -292,13 +343,19 @@ answer:
 | **`--prefill-decode-interval 40`** | 84.3 s | **1.97 s** |
 
 Interval 40 fits about a dozen decode steps between two 4,096-token chunks. The long prompt then
-takes about 20% longer to its first token, and prefill on an idle server is unchanged.
+takes about 20% longer to its first token, and prefill on an idle server is unchanged. Production
+keeps interval 40 with 8,192-token chunks on the whole card; we did not repeat this table there.
 
 ## Memory
 
+On the whole card with 16 slots, `/get_server_info` reports 19.11 GB of target weights, a 30.86 GB
+target KV pool of 1,011,164 tokens and 13.16 GB free after startup, at `--mem-fraction-static
+0.79`. The usable context is still 262,138 tokens, and a 259,728-token prompt was served (106.7 s to
+the first token). The rest of this section is the accounting of the half card.
+
 The Prometheus gauges `weight_memory_usage_gb` and `kv_cache_memory_usage_gb` count only the
-target, and the recurrent state has no gauge, so we account for memory from the startup log of the
-production revision:
+target, and the recurrent state has no gauge, so we accounted for memory on the half card from the
+startup log of the four-slot production revision:
 
 | Step | GiB | Available after | Log line |
 | --- | ---: | ---: | --- |
@@ -321,7 +378,8 @@ logged sizes add up to.
 The model has `head_dim` 256 and 4 KV heads, so a token of FP8 KV takes `2 × 4 × 256 = 2 KiB` per
 layer: 32 KiB over the 16 full-attention layers of the target and 10 KiB over the 5 layers of the
 drafter. A token of context therefore costs 42 KiB, about 30% more than without speculation, and
-the pools match this exactly: 266,083 tokens at 32 KiB is 8.12 GiB, and at 10 KiB 2.54 GiB.
+the pools match this exactly: 266,083 tokens at 32 KiB is 8.12 GiB, and at 10 KiB 2.54 GiB. On the
+whole card, 1,011,164 tokens at 32 KiB is the 30.86 GB the server reports for the target pool.
 
 The two-slot configuration had a 314,253-token pool: twelve recurrent states took 1.90 GiB, and
 `--mem-fraction-static 0.80` claimed 0.48 GiB more. We lowered the fraction to 0.79 with the move to
@@ -329,10 +387,10 @@ more slots. At 0.80 the four-slot configuration left 5.00 GB after startup, and 
 configuration with bfloat16 state 4.67 GB. On both, one `/generate` request with full-prompt top-20 input logprobs
 (`scripts/fid.py`) asked for 1.89 GiB, hit CUDA OOM and killed the server, while the two-slot
 configuration, with 5.21 GB left, survived it. At 0.79 the eight-slot configuration left 5.17 GB
-and survived the same request. The four-slot production revision now leaves 5.49 GiB; we did not repeat the
-request on it.
+and survived the same request. The four-slot half-card revision left 5.49 GiB; we did not repeat the
+request on it, nor on the whole card, which leaves 13.16 GB.
 
-The usable context is `max_req_input_len`, 262,138 here, since the pool is larger than the
+The usable context is `max_req_input_len`, 262,138 on both cards, since the pool is larger than the
 262,144-token context of the model. Clients take their context window from it and read it again
 after any change to `--mem-fraction-static`, `--max-running-requests`, `--max-mamba-cache-size`,
 the checkpoint, the drafter or the SGLang version.
@@ -363,7 +421,7 @@ unchanged:
 
 `scripts/apitest.py` tests with a 1-megapixel image, since small images pass under any setting.
 
-The move to four slots leaves image answers unchanged: four real photos are recognized alone and
+On the half card, the move to four slots left image answers unchanged: four real photos are recognized alone and
 eight of eight at four concurrent requests, and on production both revisions give the same answer
 to the same test image. That image reads "ZEBRA 7341" and both revisions answer "ZEBRA 741", an
 error of the model that the change neither introduced nor fixed.
@@ -379,7 +437,8 @@ start.
 We serve the parser of [sglang PR #25246](https://github.com/sgl-project/sglang/pull/25246), ported
 to this SGLang version in `docker/`. It streams string parameters as they are generated and converts
 the others when they close. `scripts/toolstream.py` asks for one `write` of the integers 1 to 3,000,
-a call with 16,931 characters of arguments. The following table compares the two parsers on it:
+a call with 16,931 characters of arguments. The following table compares the two parsers on it, on
+the half card:
 
 | Parser | Pieces | Longest silence | Call |
 | --- | ---: | ---: | ---: |
@@ -412,7 +471,33 @@ The port also closes calls the model leaves open: `</tool_call>` without `</func
 ([sglang#43150](https://github.com/sgl-project/sglang/issues/43150), the change of
 [PR #43467](https://github.com/sgl-project/sglang/pull/43467)), or neither closing tag before the next
 `<tool_call>`. In the second case, the non-streaming parse also merged two calls into one, so it now
-splits calls at `<function=`. `docker/test_stream.py` covers all of these shapes.
+splits calls at `<function=`. `docker/test_stream.py` covers all of these shapes. On the whole card,
+prompts that ask for two parallel calls came back as two valid calls in 6 of 6 trials on the
+16-slot test service and in 8 of 8 with the reasoning-history patch.
+
+One case remains open: when the arguments of a call contain the literal text `<tool_call>`,
+`<function=` or `<parameter=`, as in code that handles this very format, the `qwen3_coder` parser
+takes it for markup and splits one `write` into dozens of broken calls (50 to 90 in the coding-agent
+benchmark).
+
+### Thinking across turns
+
+With thinking on, an agent client sends the earlier thinking back as `thinking` blocks of the
+assistant messages. The Qwen3.8 chat template reads it from `reasoning_content` and, since
+`preserve_thinking` defaults to true, renders it in every assistant turn of the history, not only
+in the turns after the last user message. Stock v0.5.22 passes thinking to the template natively
+only for its custom chat encoders. For a Jinja template, the Anthropic adapter splices it into the
+visible content as `<think>...</think>` text, and the template renders an empty think block followed
+by that text. The re-rendered assistant message then differs from the tokens the model generated,
+and the prefix cache stops at the end of the previous prompt. Before the patch, every request that
+followed an assistant turn with thinking re-prefilled that whole assistant message: each tool-call
+round inside one user turn, and each new user message.
+
+`docker/anthropic_reasoning_history.py` passes the thinking to the template as `reasoning_content`,
+so the history renders to the tokens the model generated and the cache covers it. On the
+coding-agent benchmark, a follow-up turn reaches its first token in 0.34 s at 30k tokens and 0.46 s
+at 60k, against 1.05 and 1.34 s without the patch. `SGLANG_ANTHROPIC_NATIVE_REASONING_HISTORY=0`
+restores the stock behaviour.
 
 ## Structured output
 
@@ -432,13 +517,16 @@ answer.
 which the `hermes` parser drops. `--speculative-draft-attention-backend flashinfer` gives the
 drafter the attention kernels of the target. `--enable-cache-report` reports cache hits to clients,
 as `cache_read_input_tokens` on `/v1/messages` and `prompt_tokens_details` on chat completions.
-`--cuda-graph-max-bs-decode 4` captures the decode and verify graphs for batch sizes 1 to 4, one
-per slot count. `SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2` sets the tile of the int8 draft-head
-kernel (BN, BK, warps, stages): above 32 draft rows per verify batch, slots times block, the kernel
-tiles 64 rows, and its default tile `128,256,8,3` then needs 131,072 bytes of shared memory against
-the 101,376 of this partition, so the server failed at startup with Triton `OutOfResources`. The
-retiled kernel needs 98,304 bytes. Four slots of block 8 make 32 rows, so this revision does not
-need it; it keeps the setting of the configuration it was measured with.
+`--cuda-graph-max-bs-decode 16` captures the decode and verify graphs for batch sizes 1 to 16, one
+per slot count. `--chunked-prefill-size 8192` and `--max-prefill-tokens 8192` set the prefill chunk,
+the largest the FlashInfer GDN kernel takes; 16,384-token chunks with the Triton GDN kernel did not
+shorten the time to first token. `SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2` sets the tile of the
+int8 draft-head kernel (BN, BK, warps, stages): above 32 draft rows per verify batch, slots times
+block, the kernel tiles 64 rows, and on the half card its default tile `128,256,8,3` then needed
+131,072 bytes of shared memory against the 101,376 of the partition, so the server failed at
+startup with Triton `OutOfResources`. The retiled kernel needs 98,304 bytes. Sixteen slots of block
+8 make 128 rows, so production runs with the retiled kernel; we did not try the default tile on
+the whole card.
 DFlash 2 is a pure-attention drafter of five sliding-window
 layers without recurrent state, so the `--mamba-*` and `--linear-attn-verify-backend` flags of the
 DSpark recipe do not apply to it.
@@ -448,17 +536,24 @@ DSpark recipe do not apply to it.
 `cloudrun/service.yaml` is the deployed configuration. Cloud Run requires the container to listen on
 8080 and `gpu-zonal-redundancy-disabled: 'true'` for the deployment to complete. With `minScale:
 '1'` and `maxScale: '1'`, one instance stays warm, and a cold start occurs only when a revision is
-replaced. `containerConcurrency: 8` admits two requests per slot, so that the excess queues inside
-SGLang and Cloud Run returns 429 only beyond eight. `timeoutSeconds: 3600`, the maximum, lets an
+replaced. `containerConcurrency: 32` admits two requests per slot, so that the excess queues inside
+SGLang and Cloud Run returns 429 only beyond 32. `timeoutSeconds: 3600`, the maximum, lets an
 agent turn that writes a long file in one tool call run for up to an hour. The service declares the
-`ALPHA` launch stage, without which Cloud Run refuses the 64 GiB memory limit.
+`ALPHA` launch stage, without which Cloud Run refused the 64 GiB memory limit of the half card; we
+kept it for the 80 GiB limit of the whole card and did not try without it.
 
 The production service is `qwen38-exp-e` in us-central1. Since 2026-10-23 all its traffic goes to
-the four-slot revision `qwen38-exp-e-s4b8-fp32`, which this file describes. The previous revision,
-`qwen38-exp-e-qhead-h2`, is the two-slot configuration of commit `ed0cb7e`, with
-`--max-running-requests 2`, `--max-mamba-cache-size 12`, `--mem-fraction-static 0.80`,
-`containerConcurrency: 4` and an unpinned `google-cloud-storage`. Both run the same image, weights
-and drafter.
+the whole-card revision `qwen38-exp-e-full-arh-m1`, which this file describes: image
+`qwen38-sglang:v0.5.22-patched6-arh` (sha256:b4802ba90a231ef286904b5788d6e612fb76403c6a8c3dcd1642b1aee75327a6),
+16 slots and `minScale: '1'`. On the night of the switch, two whole-card revisions ran with
+`minScale: '0'`: `qwen38-exp-e-full-e`, with the same flags and the image before the
+reasoning-history patch, and `qwen38-exp-e-full-arh`, the same as production. The last half-card
+revision is `qwen38-exp-e-s4b8-fp32-tc3`, with four slots, `--max-mamba-cache-size 22`,
+`--cuda-graph-max-bs-decode 4`, 4,096-token prefill chunks, `containerConcurrency: 8`, 16 vCPU,
+64 GiB and `nvidia.com/gpu: 0.5`. Before it, `qwen38-exp-e-qhead-h2` was the two-slot configuration
+of commit `ed0cb7e`, with `--max-running-requests 2`, `--max-mamba-cache-size 12`,
+`--mem-fraction-static 0.80`, `containerConcurrency: 4` and an unpinned `google-cloud-storage`. All
+run the same weights and drafter.
 
 The weights come from a bucket in the same region (`BUCKET` in both yaml files).
 `quant/service.yaml` writes the quantized checkpoint to `huihui-awq/out/`, the drafter is copied
@@ -479,8 +574,15 @@ slot; decode speed is the same under both servers. SGLang returns 400 when the p
 
 ## Cold start
 
-From instance start to a ready server takes 824 s on the production revision, according to the
-timestamps of its startup log on 2026-10-23:
+On the whole card, the 16-slot test service took 13 min 24 s from instance start to a ready server
+on 2026-10-23. Production keeps one instance warm (`minScale: '1'`), so a cold start occurs only
+when a revision is replaced. While production ran with `minScale: '0'`, we measured part of a start
+from zero: the weights downloaded in 465 s (54 MB/s) one time, and in 887 s another time, when
+`gcsdl.py` failed once and retried. We never measured the time from zero to the first token, and
+production went back to `minScale: '1'`.
+
+On the half card, from instance start to a ready server took 824 s on the four-slot revision,
+according to the timestamps of its startup log on 2026-10-23:
 
 | Phase | Seconds |
 | --- | ---: |
@@ -495,9 +597,86 @@ timestamps of its startup log on 2026-10-23:
 after which SGLang loads the target in 16 seconds. Loading the target through the gcsfuse mount
 takes 849 s, because safetensors reads through the mount in small pieces.
 
-## Tuning study, 2026-10-23
+## Full card, 2026-10-23
 
-We measured five configurations on test services with the same image digest, weights and drafter as
+Production moved to a whole RTX PRO 6000 (`nvidia.com/gpu: 1`, 20 vCPU, 80 GiB) with 16 slots,
+`--max-mamba-cache-size 82`, `--cuda-graph-max-bs-decode 16`, 8,192-token prefill chunks and
+`containerConcurrency: 32`; block 8, fp32 state, the int8 draft head and block verification stay.
+We measured six configurations on test services with the image digest of the last half-card
+revision, the same weights and drafter, in the same region and from one client over the internet.
+Each got one warm-up round, then three runs of `bench2.py`, three of `bench3.py` and two of
+`prefill.py`; the table gives medians. Token-weighted is as in the
+[tuning study](#tuning-study-half-card-2026-10-23).
+
+| | A: four slots × 8 | B: 8 × 8 | C: 8 × 12 | D: 8 × 16 | **E: 16 × 8, chunk 8192 (deployed)** | F: B without int8 head or block verification |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bench2 | 231.7 | 230.4 | 241.2 | 247.6 | **231.7** | 221.5 |
+| Token-weighted, one stream | 205.1 | 203.6 | 199.0 | 202.8 | 204.3 | 194.7 |
+| Total, 4 streams | 563.7 | 562.6 | 548.5 | 532.5 | 562.5 | 548.0 |
+| Total, 8 streams | 573.1 (four run, four wait) | 863.1 | 655.1 | 540.2 | **863.3** | 837.0 |
+| Prefill at 9k / 31k / 124k | 5,386 / 4,975 / 3,481 | 5,356 / 4,976 / 3,487 | 5,133 / 4,901 / 3,487 (one run) | | 5,417 / 4,958 / 3,570 | |
+| KV pool | 1,232,992 | 1,159,049 | 1,159,049 | 1,159,049 | 1,011,164 | 1,159,049 |
+| Same greedy text as A | reference | 24/24, 14/14 | 10/24, 4/14 | 9/24, 2/14 | **24/24, 14/14** | 16/24, 7/14 |
+| Cold start | 13m28s | 12m56s | 12m50s | 16m36s | 13m24s | 14m32s |
+
+The last column but one counts greedy answers byte-identical to A, of the 24 prompts of `drift.py`
+and the 14 one-stream answers of `bench3.py`. Blocks of 12 and 16 repeat the pattern of the half
+card: bench2 rises only because code, math and JSON get faster while prose, chat and translation
+get slower, token-weighted decode does not rise, the total at eight streams falls and greedy text
+changes. E runs 16 slots of block 8 with fp32 state and returns the same greedy text as A. Its
+other checks: needle 5/5 at 30k and 120k, math 12/12, `qcon.py` 64/64 at 16 streams, and a
+259,728-token prompt served. With thinking on and sampling, bench2 gives 139.9 tok/s for prose and
+153.7 for chat.
+
+A second set of test services measured a coding agent on E with thinking on at the default effort
+of the template, `xhigh`, which is its highest; the template accepts only `xhigh`, `medium` and
+`low`, and a client that sends a thinking budget without an effort gets `xhigh`, since SGLang does
+not pass the budget to the template. One stream, medians
+of nine runs for E, four slots and no block verification, three for the others:
+
+| | Decode at 30k / 60k / 120k | Time to first token | Follow-up, time to first token at 30k / 60k |
+| --- | ---: | ---: | ---: |
+| **E** | 209 / 219 / 192 tok/s | 5.5 / 12.8 / 32.5 s | 1.05 / 1.34 s |
+| block 16 | 190 / 213 / 171 | 5.5 / 12.8 / 32.6 | 1.24 / 1.54 |
+| block 12 | 206 / 210 / 179 | 5.6 / 12.8 / 32.7 | 1.24 / 1.23 |
+| four slots | 211 / 211 / 196 | 5.5 / 12.8 / 32.5 | 1.12 / 1.32 |
+| no block verification | 206 / 209 / 196 | 5.5 / 12.8 / 32.5 | 1.21 / 1.39 |
+| 16,384-token chunks, Triton GDN | 217 / 215 / 179 | 5.7 / 12.9 / 32.8 | 1.08 / 1.50 |
+| **E + reasoning-history patch (deployed)** | 207 / 207 / 189 | 5.5 / 12.8 / 32.6 | **0.34 / 0.46** |
+
+No flag beat E beyond the noise of sampled decode. The one gain was the reasoning-history patch,
+described in [Thinking across turns](#thinking-across-turns), which production has served since the
+same night. With it, needle retrieval is 5/5, math 12/12, `qcon.py` 64/64 at three streams, and
+parallel tool calls come back valid 8 of 8 times.
+
+## Half card, 2026-10-23
+
+Until 2026-10-23, production served from half a card (`nvidia.com/gpu: 0.5`, 16 vCPU, 64 GiB) with
+four slots, revision `qwen38-exp-e-s4b8-fp32-tc3`. Its headline figures, measured as described at
+the top of this README:
+
+| | |
+| --- | --- |
+| GPU | ½ NVIDIA RTX PRO 6000 Blackwell (47.64 GiB, SM120), MIG `2g.48gb` |
+| Slots | 4 concurrent requests, fp32 recurrent state |
+| Context | 262,144 tokens per request; one 266,083-token FP8 KV pool shared by the four slots |
+| Decode, greedy, thinking off | 140.5 tok/s (prose 89.2, chat 98.1, translation 99.3, summary 118.0, code 193.4, math 180.8, JSON 204.6) |
+| Decode, greedy, thinking off, four streams | 120.7 tok/s each, 348.3 tok/s in total; 217.4 with the former two slots |
+| Decode, sampled, thinking on | 126.2 tok/s, 3.60 tokens per verification |
+| Decode, greedy, thinking off, long context | 75.5 tok/s at 34k tokens, 65.8 at 115k |
+| Prefill | 2,783 tok/s at 9k tokens, 2,568 at 31k, 1,793 at 124k |
+| Quality | needle retrieval 5/5 at 30k and 120k, multi-step math 12/12, 64 of 64 checked answers at four concurrent streams; greedy text byte-identical to the two-slot configuration on 104 of 104 prompts |
+| Cold start | 14 min |
+
+The single-stream decode was measured on the four-slot production revision. The four-stream,
+sampled and quality figures come from a test service with the same image, weights and flags at
+`--mem-fraction-static 0.80` (production ran 0.79, which changes the pool size and the free memory,
+not the computation), as medians of five runs. Long-context decode and prefill were measured on the
+earlier two-slot configuration and not repeated at four slots.
+
+## Tuning study, half card, 2026-10-23
+
+We measured five configurations on the half card on test services with the same image digest, weights and drafter as
 production, in the same region, from one client over the internet. Each got one warm-up round, then
 five runs of `bench2.py` and five of `bench3.py`; the eight-slot configuration at 0.79 and 2 × 16
 with torch-compile got three of each. The table gives medians. Token-weighted is every token after
@@ -513,7 +692,7 @@ answers byte-identical to the two-slot configuration out of 104 prompts of 256 t
 | 2 × 16, fp32, mem 0.80 | 153.4 | 124.5 | 208.5 | 211.8 | 210.6 (queued) | 314,253 | |
 | 2 × 16, fp32, torch-compile | 153.1 | 125.3 | 206.5 | 209.1 | 216.0 (queued) | | |
 
-On the production revision, `bench2.py` gives 140.5 tok/s (prose 89.2, chat 98.1, translation
+On the four-slot half-card production revision, `bench2.py` gives 140.5 tok/s (prose 89.2, chat 98.1, translation
 99.3, summary 118.0, code 193.4, math 180.8, JSON 204.6), and 80.7 tok/s for prose with thinking on
 and sampling. The server reports `max_running_requests` 4, `mamba_ssm_dtype` float32 and context
 262,144, and parallel tool calls work. Sampled with thinking on (`accept.py`, 42 answers), the
@@ -557,25 +736,8 @@ the BF16 drafter.
 An earlier revision of this README (commits `ed655c3` to `444a42a`) stated 840 to 898 tok/s at eight
 streams and an eight-slot deployment. The figure was the single-stream rate times eight, not a
 measurement, and eight slots were never deployed. The measured total at eight streams is 584.6
-tok/s for the eight-slot option and 360.3 for the deployed four slots.
+tok/s for the eight-slot option and 360.3 for the then deployed four slots.
 [`REPORT-2026-10-23.md`](REPORT-2026-10-23.md) lists every run of the study.
-
-## Full card, 2026-10-23
-
-Production moved to a whole RTX PRO 6000 (`nvidia.com/gpu: 1`, 20 vCPU, 80 GiB) with 16 slots,
-`--max-mamba-cache-size 82`, `--cuda-graph-max-bs-decode 16` and 8,192-token prefill chunks; block 8,
-the int8 draft head and block verification stay. Single-stream bench2 decode is 231.7 tok/s (140.5 on
-the half card), prefill 5,386 tok/s at 9k tokens, 863 tok/s in total at eight streams. Greedy text is
-identical to the four-slot flags on the full card. On thinking-on coding over real 30k/60k/120k-token
-code contexts, one stream decodes at 209/219/192 tok/s; blocks 12 and 16, four slots, no block
-verification and 16,384-token chunks were all within noise or slower.
-
-`docker/anthropic_reasoning_history.py` passes earlier thinking on `/v1/messages` to the chat
-template as `reasoning_content`. Stock v0.5.22 splices it into the visible content as `<think>` text
-for Jinja templates, so the re-rendered history differs from the generated tokens and every agent
-turn re-prefills the previous answer. With the patch, follow-up turns at 30k and 60k tokens reach
-their first token in 0.34 and 0.46 s instead of 1.05 and 1.34 s.
-`SGLANG_ANTHROPIC_NATIVE_REASONING_HISTORY=0` restores the stock behaviour.
 
 ## Reproduction
 

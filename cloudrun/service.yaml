@@ -1,5 +1,6 @@
 # Qwen3.8-27B, abliterated (huihui-ai) and quantized to AWQ-INT4 with cyankiwi's recipe
-# (quant/), on half an NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
+# (quant/), on one whole NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
+# Production since 2026-10-23: service qwen38-exp-e, revision qwen38-exp-e-full-arh-m1.
 # Applied with `gcloud alpha run services replace`.
 #
 # `services replace` is used rather than `run deploy --args=...` because that flag splits on
@@ -17,7 +18,8 @@ metadata:
   labels:
     cloud.googleapis.com/location: us-central1
   annotations:
-    # The 64 GiB memory limit below is refused unless the service declares the ALPHA launch stage.
+    # On the half card Cloud Run refused the 64 GiB memory limit unless the service declared the
+    # ALPHA launch stage. Kept for the 80 GiB limit below; not tried without it.
     run.googleapis.com/launch-stage: ALPHA
 spec:
   template:
@@ -25,7 +27,9 @@ spec:
       annotations:
         autoscaling.knative.dev/maxScale: '1'
         # Load-bearing, not a convenience: this is the only backend dataroom has, and a cold
-        # start is ~12 minutes (25 GB of weights from the bucket, then autotune and CUDA graphs).
+        # start is 13m24s on the whole card (25 GB of weights from the bucket, then autotune and
+        # CUDA graphs). From zero the download alone took 465 s once and 887 s with a retry, and
+        # time to first token was never measured; production went back to minScale 1.
         autoscaling.knative.dev/minScale: '1'
         run.googleapis.com/cpu-throttling: 'false'
         run.googleapis.com/execution-environment: gen2
@@ -33,9 +37,9 @@ spec:
         # Mandatory in this preview; without it the deploy hangs or fails on quota.
         run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
     spec:
-      # Two requests per slot, as before (4 slots): requests 5 to 8 queue inside SGLang, where the
-      # prefix cache and the admission order live, and Cloud Run returns 429 only beyond 8.
-      containerConcurrency: 8
+      # Two requests per slot, as before (16 slots): requests 17 to 32 queue inside SGLang, where
+      # the prefix cache and the admission order live, and Cloud Run returns 429 only beyond 32.
+      containerConcurrency: 32
       # Cloud Run's maximum. A request is one model turn, and an agent turn that writes a long
       # file in one tool call runs for many minutes; at 600 Cloud Run cut such turns off.
       timeoutSeconds: 3600
@@ -43,10 +47,14 @@ spec:
       nodeSelector:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
-        # lmsysorg/sglang:v0.5.22 with five patches and Granian, built by docker/build.sh (see the
+        # lmsysorg/sglang:v0.5.22 with six patches and Granian, built by docker/build.sh (see the
         # Dockerfile). DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817
         # (stale GDN state on prefix-cache hits). The deployed revision pins this tag by digest,
-        # sha256:28876b9aa7a67ba02dcee0bedc3b41954668c1978f64832f5c289424438f8956.
+        # sha256:b4802ba90a231ef286904b5788d6e612fb76403c6a8c3dcd1642b1aee75327a6.
+        # -arh is docker/anthropic_reasoning_history.py: earlier thinking on /v1/messages reaches
+        # the template as reasoning_content, so tool rounds and follow-up turns hit the prefix
+        # cache instead of re-prefilling the previous assistant message (README, Thinking across
+        # turns). SGLANG_ANTHROPIC_NATIVE_REASONING_HISTORY=0 restores the stock behaviour.
         - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched6-arh
           # h2c: Cloud Run speaks HTTP/2 to the container (served by Granian, --enable-http2), so a
           # client that hangs up reaches SGLang as a stream reset and its request is aborted within
@@ -78,21 +86,25 @@ spec:
           # attempt to outrun an unbounded one. It costs 45,824 tokens of KV pool
           # (max_req_input_len 185,984 -> 140,160) and no decode: 110.9 tok/s against 111.0.
           #
-          # 0.79 rather than 0.80 since the move to four slots: at 0.80 the four-slot config left
-          # 5.00 GB after startup, and one /generate with full-prompt top-20 input logprobs
-          # (scripts/fid.py) asked for 1.89 GiB, hit CUDA OOM and killed the server. At 0.79 this
-          # revision has 5.49 GB left after startup (available_gpu_mem), more than the two-slot
-          # revision's 5.21, and the pool is 266,083 tokens (max_req_input_len 262,138).
+          # 0.79 rather than 0.80 since the move to four slots on the half card: at 0.80 the
+          # four-slot config left 5.00 GB after startup, and one /generate with full-prompt top-20
+          # input logprobs (scripts/fid.py) asked for 1.89 GiB, hit CUDA OOM and killed the server.
+          # At 0.79 the half-card revision had 5.49 GB left. On the whole card with 16 slots, 13.16
+          # GB are left after startup and the pool is 1,011,164 tokens (max_req_input_len 262,138).
           #
           # --max-mamba-cache-size counts recurrent-state slots, five per running request on this
           # model (three base, two for prefix-cache tracking); sglang#43204 kills the engine when
-          # every slot is taken and locked. 22 = 5 x 4 requests + 2 spare: 3.34 GB of fp32 state.
-          # The state stays fp32 (ReplaySSM sets it): greedy output is byte-identical to
-          # the two-slot config on 104/104 prompts. bfloat16 state would fit eight slots but
-          # changes greedy text (41/104 identical); see the README.
+          # every slot is taken and locked. 82 = 5 x 16 requests + 2 spare. The state stays fp32
+          # (ReplaySSM sets it): greedy output of 16 slots is byte-identical to four slots on the
+          # same card on 24/24 drift.py and 14/14 bench3 prompts. On the half card, bfloat16 state
+          # would have fit eight slots but changed greedy text (41/104 identical); see the README.
           #
-          # --cuda-graph-max-bs-decode=4 captures decode and verify graphs for batch sizes 1-4,
+          # --cuda-graph-max-bs-decode=16 captures decode and verify graphs for batch sizes 1-16,
           # one per slot count.
+          #
+          # --chunked-prefill-size=8192 and --max-prefill-tokens=8192: the largest chunk the
+          # FlashInfer GDN prefill kernel takes (the half card ran 4096). 16,384-token chunks with
+          # the Triton GDN kernel did not shorten time to first token.
           #
           # --enable-linear-replayssm-spec, with docker/replayssm_dflash.py: verification keeps
           # compact replay records instead of the recurrent state at each of the 8 drafted
@@ -137,17 +149,17 @@ spec:
               --kv-cache-dtype=fp8_e4m3
               --attention-backend=flashinfer
               --linear-attn-prefill-backend=flashinfer
-              --chunked-prefill-size=4096
-              --max-prefill-tokens=4096
-              --max-running-requests=4
+              --chunked-prefill-size=8192
+              --max-prefill-tokens=8192
+              --max-running-requests=16
               --speculative-algorithm=DFLASH
               --speculative-draft-model-path=/tmp/dflash2
               --speculative-num-draft-tokens=8
               --speculative-draft-model-quantization=fp8
               --speculative-draft-attention-backend=flashinfer
               --min-free-slots-delay=1
-              --max-mamba-cache-size=22
-              --cuda-graph-max-bs-decode=4
+              --max-mamba-cache-size=82
+              --cuda-graph-max-bs-decode=16
               --reasoning-parser=qwen3
               --tool-call-parser=qwen3_coder
               --sampling-defaults=model
@@ -167,10 +179,10 @@ spec:
             - name: SGLANG_DFLASH_DRAFT_HEAD
               value: int8
             # Tile of the int8 draft-head kernel (BN, BK, warps, stages). Above 32 draft rows per
-            # verify batch (slots x block) the kernel tiles BM=64, and the default 128,256,8,3 then
-            # needs 131,072 B of shared memory against this MIG partition's 101,376: Triton
-            # OutOfResources at startup. 128,128,8,2 fits in 98,304 B. This revision has at most
-            # 4 x 8 = 32 rows; it carries the setting from the configuration it was measured with.
+            # verify batch (slots x block) the kernel tiles BM=64, and on the half card the default
+            # 128,256,8,3 then needed 131,072 B of shared memory against the MIG partition's
+            # 101,376: Triton OutOfResources at startup. 128,128,8,2 fits in 98,304 B. This
+            # revision has up to 16 x 8 = 128 rows; the default tile was not tried on the whole card.
             - name: SGLANG_DFLASH_DRAFT_HEAD_CFG
               value: '128,128,8,2'
             - name: SGLANG_API_KEY
@@ -193,9 +205,9 @@ spec:
               readOnly: true
           resources:
             limits:
-              cpu: '16'
-              memory: 64Gi
-              nvidia.com/gpu: '0.5'
+              cpu: '20'
+              memory: 80Gi
+              nvidia.com/gpu: '1'
           startupProbe:
             tcpSocket:
               port: 8080

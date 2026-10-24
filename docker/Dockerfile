@@ -1,4 +1,4 @@
-# Stock SGLang v0.5.22 with five changes, each a script that fails the build if v0.5.22's text
+# Stock SGLang v0.5.22 with six changes, each a script that fails the build if v0.5.22's text
 # moved (see the README), and Granian for --enable-http2:
 #   qwen3_coder_detector.py  streaming tool-call arguments (sglang PR #25246, ported), and closes
 #                            the arguments at </tool_call> when the model omits </function>
@@ -8,6 +8,8 @@
 #   draft_prob_round.py      sampled verify accepts draft probabilities that round above 1 (PR #45819)
 #   sched_admission.py       admission counts a prefilling request's row once (PR #44401)
 #   draft_head_quant.py      draft candidates from an int8 copy of lm_head (SGLANG_DFLASH_DRAFT_HEAD=int8)
+#   anthropic_reasoning_history.py  earlier thinking on /v1/messages reaches the chat template as
+#                            reasoning_content, so follow-up turns hit the prefix cache
 #
 # The parser step stops unless the stock parser fails test_stream.py (else the test proves
 # nothing), the patched parser passes it, and the patched parser passes SGLang's own Qwen3 Coder

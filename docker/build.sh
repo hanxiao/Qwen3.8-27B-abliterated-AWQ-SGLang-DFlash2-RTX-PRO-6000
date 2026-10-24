@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the serving image into Artifact Registry, where Cloud Run pulls it in-region: stock
-# lmsysorg/sglang:v0.5.22 with the five changes listed in the Dockerfile.
+# lmsysorg/sglang:v0.5.22 with the six changes listed in the Dockerfile.
 #
 # DFlash 2 shipped in SGLang v0.5.19, so no other overlay is needed. The first version of this
 # build baked an eleven-module backport onto lmsysorg/sglang:qwen38-27b; that overlay carried
