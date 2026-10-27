@@ -6,9 +6,9 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: qwen38-huihui-awq
+  name: QUANT_SERVICE
   labels:
-    cloud.googleapis.com/location: us-central1
+    cloud.googleapis.com/location: REGION
   annotations:
     run.googleapis.com/ingress: internal
     run.googleapis.com/launch-stage: ALPHA
@@ -24,7 +24,7 @@ spec:
       serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
       timeoutSeconds: 300
       containers:
-      - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.20
+      - image: REGION-docker.pkg.dev/PROJECT/REPO/qwen38-sglang:v0.5.20
         command: [bash, -c]
         args:
         - "python3 -m http.server 8080 >/dev/null 2>&1 & bash /gcs/huihui-awq/job/job.sh; echo EXIT $?; sleep infinity"

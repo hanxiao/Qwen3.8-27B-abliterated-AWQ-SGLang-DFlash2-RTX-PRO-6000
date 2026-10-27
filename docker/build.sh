@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-$(gcloud config get-value run/region 2>/dev/null)}"; : "${REGION:?set REGION}"
 REPO="${REPO:-sglang}"
 TAG="${TAG:-qwen38-sglang:v0.5.22-patched6-arh}"
 

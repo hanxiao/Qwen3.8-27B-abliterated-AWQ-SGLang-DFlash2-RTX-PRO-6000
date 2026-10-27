@@ -1,13 +1,13 @@
 # Qwen3.8-27B, abliterated (huihui-ai), in our own mixed NVFP4/FP8 quantization (ModelOpt 0.47,
 # quant/modelopt/: FP8 attention and GDN projections, NVFP4 MLPs, NVFP4 lm_head served W4A16), on
 # one whole NVIDIA RTX PRO 6000, served by SGLang with DFlash 2 block drafting.
-# Production since 2026-10-24: service qwen38-exp-e, revision qwen38-exp-e-ownq8-c8, eight slots
+# Production since 2026-10-24: service SERVICE, revision SERVICE-ownq8-c8, eight slots
 # (Han's choice of 8 concurrent requests, 2026-10-24). Earlier that day revision
-# qwen38-exp-e-ownq8 served the same flags with 16 slots (--max-running-requests=16,
+# SERVICE-ownq8 served the same flags with 16 slots (--max-running-requests=16,
 # --max-mamba-cache-size=82, --cuda-graph-max-bs-decode=16, containerConcurrency 32); it stays on
 # the service as the rollback target.
 # From 2026-10-23 to 2026-10-24 production served the AWQ-INT4 build (quant/) from revision
-# qwen38-exp-e-full-arh-m1, which stays on the service as the rollback target. Its differences from
+# SERVICE-full-arh-m1, which stays on the service as the rollback target. Its differences from
 # this file: huihui-awq/out=/tmp/model, --kv-cache-dtype=fp8_e4m3, no --fp4-gemm-backend, and
 # SGLANG_DFLASH_DRAFT_HEAD=int8 with SGLANG_DFLASH_DRAFT_HEAD_CFG=128,128,8,2.
 # Applied with `gcloud alpha run services replace`.
@@ -23,9 +23,9 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: qwen38-27b-nvfp4-dflash2
+  name: SERVICE
   labels:
-    cloud.googleapis.com/location: us-central1
+    cloud.googleapis.com/location: REGION
   annotations:
     # On the half card Cloud Run refused the 64 GiB memory limit unless the service declared the
     # ALPHA launch stage. Kept for the 80 GiB limit below; not tried without it.
@@ -58,13 +58,12 @@ spec:
       containers:
         # lmsysorg/sglang:v0.5.22 with six patches and Granian, built by docker/build.sh (see the
         # Dockerfile). DFlash 2 is upstream since v0.5.19; the old overlay image had sglang#37817
-        # (stale GDN state on prefix-cache hits). The deployed revision pins this tag by digest,
-        # sha256:b4802ba90a231ef286904b5788d6e612fb76403c6a8c3dcd1642b1aee75327a6.
+        # (stale GDN state on prefix-cache hits). The deployed revision pins this tag by digest.
         # -arh is docker/anthropic_reasoning_history.py: earlier thinking on /v1/messages reaches
         # the template as reasoning_content, so tool rounds and follow-up turns hit the prefix
         # cache instead of re-prefilling the previous assistant message (README, Thinking across
         # turns). SGLANG_ANTHROPIC_NATIVE_REASONING_HISTORY=0 restores the stock behaviour.
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/qwen38-sglang:v0.5.22-patched6-arh
+        - image: REGION-docker.pkg.dev/PROJECT/REPO/qwen38-sglang:v0.5.22-patched6-arh
           # h2c: Cloud Run speaks HTTP/2 to the container (served by Granian, --enable-http2), so a
           # client that hangs up reaches SGLang as a stream reset and its request is aborted within
           # a second. Over HTTP/1.1 the front end kept the backend request alive, and a stopped run

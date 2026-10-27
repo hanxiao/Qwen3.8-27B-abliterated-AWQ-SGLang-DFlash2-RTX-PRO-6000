@@ -33,7 +33,7 @@ These figures come from different measurements:
 - **Prefill, KL and HumanEval:** test services on 2026-10-24 that ran the production flags without
   block verification, ReplaySSM, `--prefill-decode-interval` and HTTP/2 (see
   [Quantization](#quantization)).
-- **Everything else in the table:** the production revision itself, `qwen38-exp-e-ownq8`. We
+- **Everything else in the table:** the production revision itself, `SERVICE-ownq8`. We
   measured it through a tagged URL with no traffic, before the cutover.
 
 How the benchmarks work:
@@ -479,7 +479,7 @@ slots. On it, `/get_server_info` reports:
 - 14.72 GB free after startup;
 - `max_req_input_len` 262,138, so a single request still gets the full context.
 
-With 16 slots (revision `qwen38-exp-e-ownq8`) the pool was 30.06 GB and 492,440 tokens, with
+With 16 slots (revision `SERVICE-ownq8`) the pool was 30.06 GB and 492,440 tokens, with
 12.90 GB free after startup. Fewer slots need fewer recurrent states and smaller CUDA graphs, and
 the pool takes the difference.
 
@@ -690,10 +690,10 @@ agent turn that writes a long file in one tool call run for up to an hour. The s
 `ALPHA` launch stage, without which Cloud Run refused the 64 GiB memory limit of the half card; we
 kept it for the 80 GiB limit of the whole card and did not try without it.
 
-The production service is `qwen38-exp-e` in us-central1. Since 2026-10-24 all its traffic goes to
-`qwen38-exp-e-ownq8-c8`, the revision that serves the mixed checkpoint with 8 slots, which
+The production service is `SERVICE` in `REGION`. Since 2026-10-24 all its traffic goes to
+`SERVICE-ownq8-c8`, the revision that serves the mixed checkpoint with 8 slots, which
 `cloudrun/service.yaml` describes (see [Production, 2026-10-24](#production-2026-10-24) and
-[Eight slots, 2026-10-24](#eight-slots-2026-10-24)). `qwen38-exp-e-ownq8`, the same with 16 slots,
+[Eight slots, 2026-10-24](#eight-slots-2026-10-24)). `SERVICE-ownq8`, the same with 16 slots,
 stays on the service as the first rollback target. Its image, flags and Cloud Run settings are those
 of the previous revision, with these differences:
 
@@ -702,14 +702,14 @@ of the previous revision, with these differences:
 - both `SGLANG_DFLASH_DRAFT_HEAD*` variables are removed.
 
 From 2026-10-23 to 2026-10-24 all traffic went to the whole-card AWQ revision
-`qwen38-exp-e-full-arh-m1`, which stays on the service as the rollback target: image
-`qwen38-sglang:v0.5.22-patched6-arh` (sha256:b4802ba90a231ef286904b5788d6e612fb76403c6a8c3dcd1642b1aee75327a6),
+`SERVICE-full-arh-m1`, which stays on the service as the rollback target: image
+`qwen38-sglang:v0.5.22-patched6-arh` (pinned by digest),
 16 slots and `minScale: '1'`. On the night of the switch, two whole-card revisions ran with
-`minScale: '0'`: `qwen38-exp-e-full-e`, with the same flags and the image before the
-reasoning-history patch, and `qwen38-exp-e-full-arh`, the same as production. The last half-card
-revision is `qwen38-exp-e-s4b8-fp32-tc3`, with four slots, `--max-mamba-cache-size 22`,
+`minScale: '0'`: `SERVICE-full-e`, with the same flags and the image before the
+reasoning-history patch, and `SERVICE-full-arh`, the same as production. The last half-card
+revision is `SERVICE-s4b8-fp32-tc3`, with four slots, `--max-mamba-cache-size 22`,
 `--cuda-graph-max-bs-decode 4`, 4,096-token prefill chunks, `containerConcurrency: 8`, 16 vCPU,
-64 GiB and `nvidia.com/gpu: 0.5`. Before it, `qwen38-exp-e-qhead-h2` was the two-slot configuration
+64 GiB and `nvidia.com/gpu: 0.5`. Before it, `SERVICE-qhead-h2` was the two-slot configuration
 of commit `ed0cb7e`, with `--max-running-requests 2`, `--max-mamba-cache-size 12`,
 `--mem-fraction-static 0.80`, `containerConcurrency: 4` and an unpinned `google-cloud-storage`. All
 run the same weights and drafter.
@@ -733,7 +733,7 @@ slot; decode speed is the same under both servers. SGLang returns 400 when the p
 
 ## Cold start
 
-The production revision since 2026-10-24, `qwen38-exp-e-ownq8`, took 14 min 26 s from instance
+The production revision since 2026-10-24, `SERVICE-ownq8`, took 14 min 26 s from instance
 start to ready on its first start (16:26:36 to 16:41:02 UTC, from its log):
 
 - about 9 minutes to download the target and the drafter and start SGLang (`server_args` at
@@ -770,15 +770,15 @@ takes 849 s, because safetensors reads through the mount in small pieces.
 
 On 2026-10-24 production moved from the AWQ build to our mixed NVFP4/FP8 checkpoint (see
 [Quantization](#quantization)). We added two revisions to the production service, each with 0%
-traffic and its own tag, while all traffic stayed on the AWQ revision `qwen38-exp-e-full-arh-m1`.
+traffic and its own tag, while all traffic stayed on the AWQ revision `SERVICE-full-arh-m1`.
 They had the image and flags of production, with these differences:
 
 - the weights `ownq/molh-w4h-bkv`, a BF16 KV cache and the CuTe-DSL NVFP4 GEMM;
 - no int8 draft head;
-- `qwen38-exp-e-ownq8` kept 8 draft tokens per block, and `qwen38-exp-e-ownq16` used
+- `SERVICE-ownq8` kept 8 draft tokens per block, and `SERVICE-ownq16` used
   `--speculative-num-draft-tokens 16`.
 
-We ran every check against the tag URLs, then moved all traffic to `qwen38-exp-e-ownq8`. The AWQ
+We ran every check against the tag URLs, then moved all traffic to `SERVICE-ownq8`. The AWQ
 column comes from the test services of [Full card, 2026-10-23](#full-card-2026-10-23), with the same
 flags and the same benchmark. Its one-stream coding-agent row is the deployed revision with the
 reasoning-history patch, three runs. Its two- and three-stream rows come from the same flags without
@@ -832,7 +832,7 @@ to be equal or better there, and no more than about 5% worse at two and three st
 **Cutover.** We moved all traffic with:
 
 ```bash
-gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8=100
+gcloud run services update-traffic SERVICE --region REGION --to-revisions SERVICE-ownq8=100
 ```
 
 Then we removed the `ownq8` and `ownq16` tags. A Cloud Run revision without traffic and without a
@@ -842,10 +842,10 @@ GPUs. The logs show `SIGTERM` within seconds of the change:
 - 16-token revision: tag removed at 17:31 UTC, `SIGTERM` at 17:32:00.
 - AWQ revision: `SIGTERM` at 17:43:15, three seconds after the traffic change, with no request in flight.
 
-The AWQ revision `qwen38-exp-e-full-arh-m1` stays on the service as the rollback target:
+The AWQ revision `SERVICE-full-arh-m1` stays on the service as the rollback target:
 
 ```bash
-gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-full-arh-m1=100
+gcloud run services update-traffic SERVICE --region REGION --to-revisions SERVICE-full-arh-m1=100
 ```
 
 It has no warm instance, so a rollback waits through a cold start of about 14 minutes. During that
@@ -860,7 +860,7 @@ What we learned from the rollout:
 ### Eight slots, 2026-10-24
 
 Later on 2026-10-24 Han chose 8 concurrent requests for production instead of 16. The new revision
-`qwen38-exp-e-ownq8-c8` has the flags of `qwen38-exp-e-ownq8` with these differences only:
+`SERVICE-ownq8-c8` has the flags of `SERVICE-ownq8` with these differences only:
 
 - `--max-running-requests 8` instead of 16;
 - `--max-mamba-cache-size 42` (5 × 8 + 2) instead of 82;
@@ -886,21 +886,21 @@ The one-stream decode is within the ±10% per-request noise of the coding-agent 
 moved all traffic and removed the tag in one command:
 
 ```bash
-gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8-c8=100 --remove-tags con8
+gcloud run services update-traffic SERVICE --region REGION --to-revisions SERVICE-ownq8-c8=100 --remove-tags con8
 ```
 
 The 16-slot revision got `SIGTERM` at 21:46:10 UTC, six seconds later, with no request in flight. It
 stays on the service as the rollback target:
 
 ```bash
-gcloud run services update-traffic qwen38-exp-e --region us-central1 --to-revisions qwen38-exp-e-ownq8=100
+gcloud run services update-traffic SERVICE --region REGION --to-revisions SERVICE-ownq8=100
 ```
 
 ## AWQ build, 2026-10-23 (previous production)
 
 From 2026-10-23 to 2026-10-24, production served the AWQ-INT4 build (`quant/`, described in
 [Checkpoint](#checkpoint-awq-build-production-until-2026-10-24)) from revision
-`qwen38-exp-e-full-arh-m1`, which stays on the service as the rollback target. This was the headline
+`SERVICE-full-arh-m1`, which stays on the service as the rollback target. This was the headline
 table of this README while it served:
 
 | | |
@@ -937,7 +937,7 @@ that streams `/v1/messages` with three tools, thinking on at the default effort 
 the default sampling of the model, over 29k, 59k and 119k tokens of SGLang source; a follow-up turn
 is one more user message after the answer.
 
-Production has served from a whole card since 2026-10-23, revision `qwen38-exp-e-full-arh-m1`. The
+Production has served from a whole card since 2026-10-23, revision `SERVICE-full-arh-m1`. The
 greedy decode, concurrency, prefill and quality figures above were measured that day on a test
 service with the flags of production and the image before the reasoning-history patch, which
 changes only how `/v1/messages` renders earlier thinking; bench2 and bench3 use chat completions.
@@ -1005,7 +1005,7 @@ parallel tool calls come back valid 8 of 8 times.
 ## Half card, 2026-10-23
 
 Until 2026-10-23, production served from half a card (`nvidia.com/gpu: 0.5`, 16 vCPU, 64 GiB) with
-four slots, revision `qwen38-exp-e-s4b8-fp32-tc3`. Its headline figures, measured as described at
+four slots, revision `SERVICE-s4b8-fp32-tc3`. Its headline figures, measured as described at
 the top of this README:
 
 | | |
